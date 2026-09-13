@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>decode</title></head><body><script>
+window.decodeOne = async (path) => {
+  const bytes = new Uint8Array(await (await fetch(path)).arrayBuffer());
+  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const ctx = new AudioContext();
+  try {
+    const audio = await ctx.decodeAudioData(ab);
+    const l = audio.getChannelData(0), r = audio.numberOfChannels > 1 ? audio.getChannelData(1) : l;
+    const mono = new Float32Array(l.length);
+    for (let i = 0; i < mono.length; i++) mono[i] = (l[i] + r[i]) / 2;
+    return { ok: true, sr: audio.sampleRate, ch: audio.numberOfChannels, mono: Array.from(mono) };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message || e) };
+  } finally {
+    await ctx.close();
+  }
+};
+</script></body></html>

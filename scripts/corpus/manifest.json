@@ -1,0 +1,422 @@
+{
+ "aacOk": false,
+ "items": [
+  {
+   "name": "bright-ref",
+   "kind": "wav",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "bright-mp3-96",
+   "kind": "mp3",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 355622
+  },
+  {
+   "name": "bright-mp3-128",
+   "kind": "mp3",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "bright-mp3-192",
+   "kind": "mp3",
+   "kbps": 192,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "bright-mp3-320",
+   "kind": "mp3",
+   "kbps": 320,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "bright-mp3-64m",
+   "kind": "mp3",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 1,
+   "samples": 354816
+  },
+  {
+   "name": "bright-mp364-to-wav",
+   "kind": "transcode",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 1,
+   "samples": 354816
+  },
+  {
+   "name": "bright-mp3128-to-mp3320",
+   "kind": "upconvert",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 355968
+  },
+  {
+   "name": "quiet-ref",
+   "kind": "wav",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "quiet-mp3-96",
+   "kind": "mp3",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 355622
+  },
+  {
+   "name": "quiet-mp3-128",
+   "kind": "mp3",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "quiet-mp3-192",
+   "kind": "mp3",
+   "kbps": 192,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "quiet-mp3-320",
+   "kind": "mp3",
+   "kbps": 320,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "quiet-mp3-64m",
+   "kind": "mp3",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 1,
+   "samples": 354816
+  },
+  {
+   "name": "noisy-ref",
+   "kind": "wav",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "noisy-mp3-96",
+   "kind": "mp3",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 355622
+  },
+  {
+   "name": "noisy-mp3-128",
+   "kind": "mp3",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "noisy-mp3-192",
+   "kind": "mp3",
+   "kbps": 192,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "noisy-mp3-320",
+   "kind": "mp3",
+   "kbps": 320,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "noisy-mp3-64m",
+   "kind": "mp3",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 1,
+   "samples": 354816
+  },
+  {
+   "name": "sweep-ref",
+   "kind": "wav",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "sweep-mp3-96",
+   "kind": "mp3",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 355622
+  },
+  {
+   "name": "sweep-mp3-128",
+   "kind": "mp3",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "sweep-mp3-192",
+   "kind": "mp3",
+   "kbps": 192,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "sweep-mp3-320",
+   "kind": "mp3",
+   "kbps": 320,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 354816
+  },
+  {
+   "name": "sweep-mp3-64m",
+   "kind": "mp3",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 1,
+   "samples": 354816
+  },
+  {
+   "name": "bright-aac-128",
+   "kind": "aac",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "bright-aac-256",
+   "kind": "aac",
+   "kbps": 256,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "bright-aac-64",
+   "kind": "aac",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "bright-aac64-to-wav",
+   "kind": "transcode",
+   "kbps": null,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 353280
+  },
+  {
+   "name": "bright-mp3128-to-aac256",
+   "kind": "upconvert",
+   "kbps": 256,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "bright-opus-128",
+   "kind": "opus",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "bright-opus-64",
+   "kind": "opus",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "bright-opus-96",
+   "kind": "opus",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "noisy-aac-128",
+   "kind": "aac",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "noisy-aac-256",
+   "kind": "aac",
+   "kbps": 256,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "noisy-aac-64",
+   "kind": "aac",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "noisy-opus-128",
+   "kind": "opus",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "noisy-opus-64",
+   "kind": "opus",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "noisy-opus-96",
+   "kind": "opus",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "quiet-aac-128",
+   "kind": "aac",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "quiet-aac-256",
+   "kind": "aac",
+   "kbps": 256,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "quiet-aac-64",
+   "kind": "aac",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "quiet-opus-128",
+   "kind": "opus",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "quiet-opus-64",
+   "kind": "opus",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "quiet-opus-96",
+   "kind": "opus",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "sweep-aac-128",
+   "kind": "aac",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "sweep-aac-256",
+   "kind": "aac",
+   "kbps": 256,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "sweep-aac-64",
+   "kind": "aac",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352800
+  },
+  {
+   "name": "sweep-opus-128",
+   "kind": "opus",
+   "kbps": 128,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "sweep-opus-64",
+   "kind": "opus",
+   "kbps": 64,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  },
+  {
+   "name": "sweep-opus-96",
+   "kind": "opus",
+   "kbps": 96,
+   "sr": 44100,
+   "ch": 2,
+   "samples": 352799
+  }
+ ],
+ "aacEncoder": "ffmpeg-7.0.2-native-aac"
+}
