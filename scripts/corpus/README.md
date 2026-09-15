@@ -42,3 +42,13 @@ node --experimental-strip-types --no-warnings \
 `ts-resolve.mjs` is a tiny ESM hook that lets plain Node import the repo's
 extensionless TypeScript sources, so the harness always tests real code —
 never copies.
+
+## Scope notes
+
+- Pure test tones (e.g. two sine waves, no mid-band content) defeat any
+  relative-threshold detector: with an empty mid band there is no anchor, so
+  window leakage reads as full bandwidth. Two separate guards were tried
+  (absolute −90 dBFS floor; skipping mid-silent frames) and both misgraded
+  quiet music, so both were reverted. Real songs always carry mid-band
+  energy; test tones are out of scope (the app targets same-song
+  comparisons, where both files share the same sparseness anyway).

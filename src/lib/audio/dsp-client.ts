@@ -72,19 +72,35 @@ export async function runDspParallel(
     return runDsp(mono, sampleRate, clipFraction, onProgress, spans);
   }
 
-  let worker: Worker;
+  const jobId = ++jobSeq;
+  // No transfer: the mono buffer is structured-cloned (~100 ms worst case),
+  // which keeps the original usable so a wedged worker can fall back to the
+  // main-thread path instead of hanging forever on a detached buffer.
+  const WORKER_TIMEOUT_MS = 60_000;
+  let worker: Worker | null = null;
   try {
     worker = new Worker(new URL("./dsp.worker.ts", import.meta.url), {
       type: "module",
     });
   } catch {
+    console.warn("[spectra] worker unavailable, analyzing on main thread");
     return runDsp(mono, sampleRate, clipFraction, onProgress, spans);
   }
 
-  const jobId = ++jobSeq;
+  const active = worker;
   try {
     return await new Promise<DspResult>((resolve, reject) => {
-      worker.onmessage = (e: MessageEvent) => {
+      const timer = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("worker-timeout"));
+      }, WORKER_TIMEOUT_MS);
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        active.onmessage = null;
+        active.onerror = null;
+        active.terminate();
+      };
+      active.onmessage = (e: MessageEvent) => {
         const d = e.data as {
           jobId?: number;
           type?: string;
@@ -97,20 +113,31 @@ export async function runDspParallel(
         if (d.type === "progress") {
           onProgress?.(d.phase ?? "", d.amount ?? 0);
         } else if (d.type === "done" && d.result) {
+          cleanup();
           resolve(d.result);
         } else if (d.type === "error") {
+          cleanup();
           reject(new Error(d.message || "Analysis failed in worker."));
         }
       };
-      worker.onerror = () => {
+      active.onerror = () => {
+        cleanup();
         reject(new Error("Analysis worker failed to start."));
       };
-      // Zero-copy handoff: the main thread must not touch mono afterwards.
-      worker.postMessage(
-        { jobId, mono, sampleRate, clipFraction, spans },
-        [mono.buffer],
-      );
+      active.postMessage({ jobId, mono, sampleRate, clipFraction, spans });
     });
+  } catch (err) {
+    // A failed worker must never strand an analysis: fall back to the
+    // legacy main-thread path (possible because mono was cloned, not
+    // transferred). Deterministic DSP bugs surface identically from legacy,
+    // so nothing is hidden — timeouts just become retried work instead of a
+    // hung spinner.
+    console.warn(
+      "[spectra]",
+      err instanceof Error ? err.message : "worker failed",
+      "— retrying on main thread",
+    );
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans);
   } finally {
     worker.terminate();
   }

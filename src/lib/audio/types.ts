@@ -61,6 +61,8 @@ export type Analysis = {
   sourceLimited: boolean;
   /** True when a very long file was analyzed from excerpts (memory guard). */
   liteAnalysis: boolean;
+  /** Sampled content hash (IndexedDB key). Equal keys = identical bytes. */
+  cacheKey: string | null;
   peakDb: number;
   rmsDb: number;
   crestDb: number;

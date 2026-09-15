@@ -874,6 +874,7 @@ export async function analyzeFile(
         fileSize: file.size,
         mimeType: file.type,
         objectUrl: URL.createObjectURL(file),
+        cacheKey: key,
       };
     }
   }
@@ -983,6 +984,7 @@ export async function analyzeFile(
     scoreParts: dsp.scoreParts,
     sourceLimited: dsp.sourceLimited,
     liteAnalysis,
+    cacheKey: key,
     peakDb: loud.peakDb,
     rmsDb: loud.rmsDb,
     crestDb: loud.crestDb,

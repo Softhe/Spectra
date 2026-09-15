@@ -51,6 +51,7 @@ function mkAnalysis(o: {
     scoreParts: { ceiling: 62, rolloff: 12, air: 14, clarity: 12, clip: 0 },
     sourceLimited: o.limited ?? false,
     liteAnalysis: false,
+    cacheKey: null,
     peakDb: 0,
     rmsDb: -9,
     crestDb: 9,

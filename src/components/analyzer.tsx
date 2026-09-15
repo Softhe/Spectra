@@ -140,9 +140,11 @@ export function Analyzer() {
 
   const a = analysisOf(slots.a);
   const b = analysisOf(slots.b);
+  // Same bytes in both slots: a faux tie helps nobody — say so directly.
+  const identical = Boolean(a?.cacheKey && b?.cacheKey && a.cacheKey === b.cacheKey);
   const comparison: Comparison | null = useMemo(
-    () => (a && b ? compareAnalyses(a, b) : null),
-    [a, b],
+    () => (a && b && !identical ? compareAnalyses(a, b) : null),
+    [a, b, identical],
   );
 
   // A/B compare: which slot the verdict button started (null = manual play).
@@ -281,6 +283,10 @@ export function Analyzer() {
     const t0 = performance.now();
     const finish = () => {
       if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
+      // Terminal: consume the seq so the backstop timeout below can tell a
+      // completed fade from one stalled mid-way (an element that resumed
+      // playing afterwards must never be paused by it).
+      fadeSeq.current[id]++;
       el.pause();
       try {
         el.volume = holdVolume;
@@ -316,10 +322,15 @@ export function Analyzer() {
     }, 600);
   }, []);
 
+  // Switch generation: a stale seek/play from an outpaced switch must never
+  // disturb the newest one (otherwise two exclusivity pauses silence both).
+  const switchSeq = useRef(0);
+
   const abSwitch = useCallback(
     (target: SlotId) => {
       const pair = abAnalyses.current;
       if (!pair) return;
+      const mySwitch = ++switchSeq.current;
       const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
       const targetEl = els.find((el) => el.dataset.slot === target);
       const otherEl = els.find((el) => el.dataset.slot !== target) ?? null;
@@ -345,8 +356,10 @@ export function Analyzer() {
       targetEl.volume = targetVolume;
 
       const startTarget = () => {
+        if (switchSeq.current !== mySwitch) return;
         abArmed.current = true;
         targetEl.play().catch(() => {
+          if (switchSeq.current !== mySwitch) return;
           abArmed.current = false;
           setAbPlaying(null);
         });
@@ -394,23 +407,26 @@ export function Analyzer() {
 
   const outcomeFor = useCallback(
     (id: SlotId): Outcome => {
+      if (identical) return a && b ? "tie" : null;
       if (!comparison) return null;
       if (comparison.winner === "tie") return "tie";
       return comparison.winner === id ? "win" : "lose";
     },
-    [comparison],
+    [comparison, identical, a, b],
   );
 
   // Declare the winner everywhere, including the tab title.
   useEffect(() => {
-    if (!comparison) {
+    if (identical) {
+      document.title = "Identical files · Spectra";
+    } else if (!comparison) {
       document.title = "Spectra";
     } else if (comparison.winner === "tie") {
       document.title = "Toss-up · Spectra";
     } else {
       document.title = `File ${comparison.winner.toUpperCase()} wins · Spectra`;
     }
-  }, [comparison]);
+  }, [comparison, identical]);
 
   return (
     <div
@@ -445,16 +461,36 @@ export function Analyzer() {
           </div>
         </header>
 
-        {comparison && (
-          <Verdict
-            comparison={comparison}
-            a={a!}
-            b={b!}
-            abPlaying={abPlaying}
-            onAbSwitch={(target) => abSwitch(target)}
-            volume={volume}
-            onVolumeChange={handleVolumeChange}
-          />
+        {identical && a && b ? (
+          <aside
+            aria-live="polite"
+            className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5"
+          >
+            <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
+              <Info className="size-3.5 text-info" />
+              Identical files · no comparison
+            </p>
+            <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
+              Both slots hold the same bytes
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
+              {a.fileName} matched itself bit-for-bit, so there is nothing to
+              declare. Drop a different copy of the song into either slot to
+              compare.
+            </p>
+          </aside>
+        ) : (
+          comparison && (
+            <Verdict
+              comparison={comparison}
+              a={a!}
+              b={b!}
+              abPlaying={abPlaying}
+              onAbSwitch={(target) => abSwitch(target)}
+              volume={volume}
+              onVolumeChange={handleVolumeChange}
+            />
+          )
         )}
 
         <div className="grid gap-4 lg:grid-cols-2">

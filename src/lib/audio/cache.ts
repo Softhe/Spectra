@@ -76,6 +76,9 @@ function openDb(): Promise<IDBDatabase | null> {
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
+      // A blocked upgrade (another tab holding the old version) must never
+      // hang an analysis: skip the cache instead.
+      req.onblocked = () => resolve(null);
     } catch {
       resolve(null);
     }
