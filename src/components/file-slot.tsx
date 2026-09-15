@@ -197,7 +197,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
           <span className="flex size-11 items-center justify-center rounded-md bg-bg-subtle text-muted">
             <Upload className="size-5" />
           </span>
-          <span className="text-sm text-fg">Drop an MP3, M4A, WAV, or FLAC</span>
+          <span className="text-sm text-fg">Drop MP3, M4A, WAV, FLAC, OGG, or AIFF</span>
           <span className="text-xs text-muted">or click to browse</span>
         </button>
       )}
@@ -206,8 +206,18 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
         <div className="flex min-h-52 flex-1 flex-col items-center justify-center gap-3 px-4">
           <AudioLines className="size-6 text-muted" />
           <p className="text-sm text-fg">Reading {state.fileName}</p>
-          <p className="font-mono text-xs text-muted">{state.phase}</p>
-          <div className="h-1 w-40 overflow-hidden rounded-full bg-bg-subtle">
+          <p aria-live="polite" className="font-mono text-xs text-muted">
+            {state.phase}
+          </p>
+          <div
+            role="progressbar"
+            aria-label={`Analyzing ${state.fileName}`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(state.progress * 100)}
+            aria-valuetext={`${state.phase}, ${Math.round(state.progress * 100)}%`}
+            className="h-1 w-40 overflow-hidden rounded-full bg-bg-subtle"
+          >
             <div
               className="h-full bg-accent transition-[width] duration-200 ease-out"
               style={{ width: `${Math.round(state.progress * 100)}%` }}
@@ -218,7 +228,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
 
       {state.status === "error" && (
         <div className="flex min-h-52 flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
-          <p className="text-sm text-loss">{state.message}</p>
+          <p role="alert" className="text-sm text-loss">
+            {state.message}
+          </p>
           <Button variant="outline" size="sm" onClick={() => inputRef.current?.click()}>
             Try another file
           </Button>
@@ -358,17 +370,25 @@ function SeekBar({
 }) {
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const clamped = Math.max(0, Math.min(position, safeDuration));
+  // While dragging, show the dragged value and only hit the media element
+  // on commit — one seek per gesture instead of dozens per second (each
+  // restarts decode and stutters the A/B comparison).
+  const [dragValue, setDragValue] = useState<number | null>(null);
   return (
     <div className="flex items-center gap-2">
       <span className="w-10 shrink-0 font-mono text-[11px] text-faint tabular-nums">
-        {formatDuration(clamped)}
+        {formatDuration(dragValue ?? clamped)}
       </span>
       <Slider.Root
-        value={[clamped]}
+        value={[dragValue ?? clamped]}
         max={Math.max(safeDuration, 0.01)}
         step={0.1}
         disabled={safeDuration <= 0}
         onValueChange={([v]) => {
+          if (v != null) setDragValue(v);
+        }}
+        onValueCommit={([v]) => {
+          setDragValue(null);
           if (v != null) onSeek(v);
         }}
         className="relative flex h-6 flex-1 touch-none items-center disabled:pointer-events-none disabled:opacity-40"

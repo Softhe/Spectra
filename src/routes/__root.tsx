@@ -27,27 +27,29 @@ export const Route = createRootRoute({
       { rel: "preload", href: "/fonts/plex-sans-var.woff2", as: "font", type: "font/woff2", crossOrigin: "anonymous" },
     ],
   }),
-  component: () => {
-    // Offline shell: registered in production only, so dev HMR never fights
-    // a stale cache. Skipped where unsupported (older Safari, insecure ctx).
-    useEffect(() => {
-      if (!import.meta.env.PROD) return;
-      if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
-      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-    }, []);
-    return (
-      <html lang="en" className="antialiased" suppressHydrationWarning>
-        <head>
-          <HeadContent />
-        </head>
-        <body>
-          <PreviewHostBridge />
-          <AuthProvider>
-            <Outlet />
-          </AuthProvider>
-          <Scripts />
-        </body>
-      </html>
-    );
-  },
+  component: RootLayout,
 });
+
+function RootLayout() {
+  // Offline shell: registered in production only, so dev HMR never fights
+  // a stale cache. Skipped where unsupported (older Safari, insecure ctx).
+  useEffect(() => {
+    if (!import.meta.env.PROD) return;
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  }, []);
+  return (
+    <html lang="en" className="antialiased" suppressHydrationWarning>
+      <head>
+        <HeadContent />
+      </head>
+      <body>
+        <PreviewHostBridge />
+        <AuthProvider>
+          <Outlet />
+        </AuthProvider>
+        <Scripts />
+      </body>
+    </html>
+  );
+}

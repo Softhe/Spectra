@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } fro
 import { FileSlot, type Outcome, type SlotState } from "@/components/file-slot";
 import { SpectrumPlot } from "@/components/spectrum-plot";
 import { Button } from "@/components/ui/button";
-import { analyzeFile, compareAnalyses, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
+import { analyzeFile, CancelledError, compareAnalyses, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import { makeDemoFiles } from "@/lib/audio/demo";
 import { channelLabel, formatBytes, formatDuration, formatHz, formatSampleRate } from "@/lib/audio/format";
 import type { Analysis, Comparison, ScoreParts, SlotId } from "@/lib/audio/types";
@@ -13,6 +13,10 @@ import { cn } from "@/lib/utils";
 type Slots = { a: SlotState; b: SlotState };
 
 const idle: SlotState = { status: "idle" };
+
+// Filename fallback covers OSes that hand drops an empty MIME type (Linux
+// file managers, some Android intents) — a .m4a must never be filtered out.
+const AUDIO_FILE_RE = /audio|mpeg|mp4|m4a|aac|ogg|opus|wav|flac|aiff|aif|caf/i;
 
 function analysisOf(s: SlotState): Analysis | null {
   return s.status === "ready" ? s.analysis : null;
@@ -52,6 +56,18 @@ export function Analyzer() {
   const [demoBusy, setDemoBusy] = useState(false);
   const gens = useRef({ a: 0, b: 0 });
   const urls = useRef({ a: null as string | null, b: null as string | null });
+  const controllers = useRef({ a: null as AbortController | null, b: null as AbortController | null });
+  // Transient feedback when a drop matches nothing audio-like.
+  const [dropNotice, setDropNotice] = useState<string | null>(null);
+  const noticeTimer = useRef(0);
+
+  const showDropNotice = useCallback((message: string) => {
+    setDropNotice(message);
+    window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setDropNotice(null), 4500);
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
   const release = useCallback((id: SlotId) => {
     // Stop any in-flight playback first: revoking a blob URL out from under
@@ -67,6 +83,12 @@ export function Analyzer() {
   const run = useCallback(
     async (id: SlotId, file: File) => {
       const gen = ++gens.current[id];
+      // A previous in-flight analysis (this slot) must stop computing, not
+      // just get discarded on arrival: on serial devices it otherwise holds
+      // the queue, and everywhere else it burns a worker for nothing.
+      controllers.current[id]?.abort();
+      const controller = new AbortController();
+      controllers.current[id] = controller;
       release(id);
       setSlots((s) => ({
         ...s,
@@ -75,14 +97,14 @@ export function Analyzer() {
       try {
         const analysis = await enqueueAnalysis(async () => {
           // A newer file may have arrived while queued on serial devices.
-          if (gens.current[id] !== gen) throw new Error("superseded");
+          if (gens.current[id] !== gen) throw new CancelledError();
           return analyzeFile(file, (phase, amount) => {
             if (gens.current[id] !== gen) return;
             setSlots((s) => ({
               ...s,
               [id]: { status: "loading", fileName: file.name, progress: amount, phase },
             }));
-          });
+          }, controller.signal);
         });
         if (gens.current[id] !== gen) {
           URL.revokeObjectURL(analysis.objectUrl);
@@ -91,7 +113,7 @@ export function Analyzer() {
         urls.current[id] = analysis.objectUrl;
         setSlots((s) => ({ ...s, [id]: { status: "ready", analysis } }));
       } catch (err) {
-        if (gens.current[id] !== gen) return;
+        if (err instanceof CancelledError || gens.current[id] !== gen) return;
         const message = err instanceof Error ? err.message : "Could not analyze that file.";
         setSlots((s) => ({ ...s, [id]: { status: "error", message } }));
       }
@@ -102,6 +124,8 @@ export function Analyzer() {
   const clear = useCallback(
     (id: SlotId) => {
       gens.current[id]++;
+      controllers.current[id]?.abort();
+      controllers.current[id] = null;
       release(id);
       setSlots((s) => ({ ...s, [id]: idle }));
     },
@@ -123,9 +147,12 @@ export function Analyzer() {
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       const files = [...e.dataTransfer.files].filter((f) =>
-        /audio|mpeg|mp4|ogg|wav|flac/i.test(f.type || f.name),
+        AUDIO_FILE_RE.test(f.type || f.name),
       );
-      if (files.length === 0) return;
+      if (files.length === 0) {
+        showDropNotice("That doesn't look like an audio file — try MP3, M4A, WAV, FLAC, OGG or AIFF.");
+        return;
+      }
       if (files.length >= 2) {
         void run("a", files[0]!);
         void run("b", files[1]!);
@@ -135,13 +162,24 @@ export function Analyzer() {
         slots.a.status === "idle" ? "a" : slots.b.status === "idle" ? "b" : "a";
       void run(target, files[0]!);
     },
-    [run, slots.a.status, slots.b.status],
+    [run, slots.a.status, slots.b.status, showDropNotice],
   );
 
   const a = analysisOf(slots.a);
   const b = analysisOf(slots.b);
   // Same bytes in both slots: a faux tie helps nobody — say so directly.
-  const identical = Boolean(a?.cacheKey && b?.cacheKey && a.cacheKey === b.cacheKey);
+  // Content-hash keys are primary; when neither hash could be computed
+  // (insecure context, no crypto.subtle), name+size is a conservative
+  // fallback so bit-identical drops still get the honest-tie panel.
+  const identical = Boolean(
+    (a?.cacheKey && b?.cacheKey && a.cacheKey === b.cacheKey) ||
+      (a &&
+        b &&
+        !a.cacheKey &&
+        !b.cacheKey &&
+        a.fileName === b.fileName &&
+        a.fileSize === b.fileSize),
+  );
   const comparison: Comparison | null = useMemo(
     () => (a && b && !identical ? compareAnalyses(a, b) : null),
     [a, b, identical],
@@ -405,6 +443,28 @@ export function Analyzer() {
     abSwitchRef.current = abSwitch;
   });
 
+  // Keyboard A/B: the ear-compare workflow is a rapid toggle, and reaching
+  // for the button each time breaks the illusion of one continuous take.
+  // The A and B keys jump straight to that copy at the same position.
+  // Skipped while typing (no inputs today, but future-proof) and with
+  // modifier chords, which belong to the browser.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const key = e.key.toLowerCase();
+      if (key !== "a" && key !== "b") return;
+      if (!(a && b)) return;
+      const target: SlotId = key === "a" ? "a" : "b";
+      if (abPlaying === target) return;
+      e.preventDefault();
+      abSwitch(target);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [a, b, abPlaying, abSwitch]);
+
   const outcomeFor = useCallback(
     (id: SlotId): Outcome => {
       if (identical) return a && b ? "tie" : null;
@@ -460,6 +520,16 @@ export function Analyzer() {
             </Button>
           </div>
         </header>
+
+        {dropNotice && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-warn shadow-[var(--shadow-border)]"
+          >
+            {dropNotice}
+          </p>
+        )}
 
         {identical && a && b ? (
           <aside
@@ -579,7 +649,15 @@ function Verdict({
             : "A/B compare by ear"}
         </Button>
         <span className="text-xs text-faint">
-          Same position, matched loudness.
+          Same position, matched loudness — or press{" "}
+          <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+            A
+          </kbd>
+          /
+          <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+            B
+          </kbd>{" "}
+          to switch
         </span>
         <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
         <CopyReport comparison={comparison} a={a} b={b} />

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { buildLut, DB_MAX, DB_MIN } from "@/lib/audio/colormap";
 import { formatHz } from "@/lib/audio/format";
 import type { Analysis } from "@/lib/audio/types";
@@ -15,7 +15,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hoverRaf = useRef(0);
-  const [hover, setHover] = useState<{ hz: number; y: number } | null>(null);
+  const [hover, setHover] = useState<number | null>(null);
 
   useEffect(() => () => cancelAnimationFrame(hoverRaf.current), []);
 
@@ -99,10 +99,21 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
     draw();
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const ro = new ResizeObserver(() => draw());
+    // Coalesce resize bursts (window drags, orientation changes) to one
+    // repaint per frame — same pattern as SpectrumPlot.
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(draw);
+    });
     ro.observe(wrap);
-    return () => ro.disconnect();
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, [draw]);
+
+  const hoverStepHz = 500;
 
   function onPointer(e: PointerEvent<HTMLDivElement>) {
     // Pointermove fires faster than React can usefully re-render; coalesce
@@ -114,12 +125,35 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
       if (!wrap) return;
       const rect = wrap.getBoundingClientRect();
       const t = 1 - (clientY - rect.top) / rect.height;
-      setHover({
-        hz: Math.max(0, Math.min(analysis.spectrogram.maxHz, t * analysis.spectrogram.maxHz)),
-        y: clientY - rect.top,
-      });
+      setHover(Math.max(0, Math.min(analysis.spectrogram.maxHz, t * analysis.spectrogram.maxHz)));
     });
   }
+
+  function onProbeKey(e: KeyboardEvent<HTMLDivElement>) {
+    let delta = 0;
+    if (e.key === "ArrowUp") delta = hoverStepHz;
+    else if (e.key === "ArrowDown") delta = -hoverStepHz;
+    else if (e.key === "Home") {
+      e.preventDefault();
+      setHover(analysis.spectrogram.maxHz);
+      return;
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setHover(0);
+      return;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    setHover((h) => {
+      const base = h ?? analysis.spectrogram.maxHz / 2;
+      return Math.max(0, Math.min(analysis.spectrogram.maxHz, base + delta));
+    });
+  }
+
+  // Keyboard probes need a percentage position — no rect measurement at
+  // render time. Pointer probes land on the same representation.
+  const hoverTop = hover == null ? null : (1 - hover / analysis.spectrogram.maxHz) * 100;
 
   const ticks = [0, 5, 10, 15, 20].filter(
     (k) => k * 1000 <= analysis.spectrogram.maxHz + 50,
@@ -130,20 +164,29 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
       <div className="relative min-w-0 flex-1">
         <div
           ref={wrapRef}
-          className="relative h-48 w-full overflow-hidden rounded-md bg-bg-inset sm:h-64"
+          tabIndex={0}
+          className="relative h-48 w-full overflow-hidden rounded-md bg-bg-inset outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:h-64"
+          title="Use ↑ / ↓ to probe frequencies with the keyboard"
           onPointerMove={onPointer}
           onPointerEnter={onPointer}
           onPointerLeave={() => setHover(null)}
+          onKeyDown={onProbeKey}
+          onFocus={() =>
+            // Arriving by keyboard should show something to move immediately.
+            setHover((h) => h ?? analysis.spectrogram.maxHz / 2)
+          }
+          onBlur={() => setHover(null)}
         >
           <canvas
             ref={canvasRef}
             className="block size-full"
+            role="img"
             aria-label={`Spectrogram of ${analysis.fileName}, ceiling ${formatHz(analysis.cutoffHz)}`}
           />
-          {hover && (
+          {hoverTop != null && (
             <div
               className="pointer-events-none absolute inset-x-0 h-px bg-fg/70"
-              style={{ top: hover.y }}
+              style={{ top: `${hoverTop}%` }}
             />
           )}
         </div>
@@ -184,9 +227,9 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
             {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
           </span>
         </div>
-        {hover && (
+        {hover != null && (
           <div className="mt-1 font-mono text-[11px] text-fg tabular-nums">
-            {formatHz(hover.hz)}
+            {formatHz(hover)}
           </div>
         )}
       </div>

@@ -10,6 +10,7 @@ import {
   compareAuthInvariant,
   probeDevAuthEnabled,
 } from "./check-auth-invariant.mjs";
+import { projectRoot } from "./with-app-env.mjs";
 import {
   baselineComparison,
   bodyTextPrefix,
@@ -140,7 +141,12 @@ try {
     };
   }
 
-  const brandWarnings = computeBrandWarnings({ hasCanvas: viewports.desktop.hasCanvas });
+  // Audit THIS checkout's public/ (a git worktree is not /workspace — the
+  // fixed default would grade the parent checkout's brand assets).
+  const brandWarnings = computeBrandWarnings({
+    hasCanvas: viewports.desktop.hasCanvas,
+    workspaceRoot: projectRoot(),
+  });
   // Only a dev server answers /__app-env, so smoking the built output reads as
   // indeterminate — report a divergence, never the absence of an observation.
   const authWarnings = authInvariantWarnings(

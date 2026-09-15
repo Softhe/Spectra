@@ -6,7 +6,8 @@
 // Run from the repo root (needs the dev server on :8080):
 //   npm install --prefix /tmp/corpus-tools lamejs   # one-time tool install
 //   node scripts/corpus/make-corpus.mjs
-import { mkdirSync, writeFileSync } from "node:fs";
+/* global lamejs -- injected in the page via addScriptTag (line below) */
+import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
 
 const CORPUS_DIR = process.env.CORPUS_DIR || "/tmp/corpus";
@@ -110,7 +111,7 @@ const items = await p.evaluate(async () => {
     return new Uint8Array(buf);
   }
 
-  async function decode(bytes, mime) {
+  async function decode(bytes, _mime) {
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     // Realtime AudioContext: decodeAudioData keeps the NATURAL sample rate
     // (OfflineAudioContext would resample and paint imaging above Nyquist).
@@ -127,7 +128,7 @@ const items = await p.evaluate(async () => {
   for (const kind of ["bright", "quiet", "noisy", "sweep"]) {
     const { L, R } = render(kind);
     push(`${kind}-ref`, "wav", L, R);
-    const wbytes = wav(L, R);
+    const _wbytes = wav(L, R);
     for (const kbps of mp3Rates) {
       const d = await decode(mp3(L, R, kbps), "audio/mpeg");
       out.push({ name: `${kind}-mp3-${kbps}`, kind: "mp3", kbps, ...d });

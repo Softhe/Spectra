@@ -26,7 +26,17 @@ function hex(bytes: ArrayBuffer): string {
     .join("");
 }
 
-export async function cacheKeyForFile(file: Blob): Promise<string | null> {
+/** FNV-1a 32-bit — weak, but only ever used when crypto.subtle is absent. */
+function fnv1a(bytes: Uint8Array): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i]!;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+export async function cacheKeyForFile(file: File): Promise<string | null> {
   try {
     const size = file.size;
     const slices: Blob[] = [file.slice(0, SAMPLE)];
@@ -50,6 +60,15 @@ export async function cacheKeyForFile(file: Blob): Promise<string | null> {
       off += p.length;
     }
     joined.set(sizeBytes, off);
+    // Insecure contexts (LAN testing, hardened browsers) expose no
+    // crypto.subtle; falling back to null would silently disable the
+    // identical-file tie, so degrade to a sampled FNV key instead.
+    if (typeof crypto?.subtle?.digest !== "function") {
+      const tag = new TextEncoder().encode(
+        `${file.name}\u0000${file.lastModified}\u0000`,
+      );
+      return `v${DSP_VERSION}:w:${fnv1a(tag)}:${fnv1a(joined)}`;
+    }
     const digest = await crypto.subtle.digest(
       "SHA-256",
       joined.buffer as ArrayBuffer,
@@ -136,7 +155,19 @@ export async function cachePut(
         const cursorReq = store.index(SAVED_AT_INDEX).openCursor();
         cursorReq.onsuccess = () => {
           const cursor = cursorReq.result;
-          if (!cursor || over <= 0) {
+          if (!cursor) {
+            store.put(entry);
+            return;
+          }
+          // Entries from an older DSP_VERSION can never be read again —
+          // they are dead weight, not history. Free them first and they do
+          // not even count against the budget.
+          if ((cursor.value as StoredEntry | undefined)?.version !== DSP_VERSION) {
+            cursor.delete();
+            cursor.continue();
+            return;
+          }
+          if (over <= 0) {
             store.put(entry);
             return;
           }

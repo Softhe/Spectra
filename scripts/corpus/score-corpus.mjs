@@ -1,7 +1,7 @@
 // Scores $CORPUS_DIR/items/*.f32 with the REAL detection functions from
 // src/lib/audio/analyze.ts (no copies). Run from the repo root:
 //   node --experimental-strip-types --no-warnings --loader ./scripts/corpus/ts-resolve.mjs ./scripts/corpus/score-corpus.mjs [name-filter]
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import {
   classifyQuality,
   compareAnalyses,

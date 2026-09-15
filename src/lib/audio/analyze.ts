@@ -26,6 +26,18 @@ function yieldToMain(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
 
+/** Thrown when an analysis is superseded or its slot is cleared. */
+export class CancelledError extends Error {
+  constructor() {
+    super("cancelled");
+    this.name = "CancelledError";
+  }
+}
+
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new CancelledError();
+}
+
 type MonoStats = {
   mono: Float32Array;
   peakDb: number;
@@ -42,6 +54,7 @@ type MonoStats = {
 async function mixDownWithStats(
   buffer: AudioBuffer,
   materialize = true,
+  signal?: AbortSignal,
 ): Promise<MonoStats> {
   const n = buffer.length;
   const ch = buffer.numberOfChannels;
@@ -74,7 +87,10 @@ async function mixDownWithStats(
     for (let s = 0; s < n; s += CHUNK) {
       const end = Math.min(n, s + CHUNK);
       for (let i = s; i < end; i++) tally(data[i]!, i);
-      if (end < n) await yieldToMain();
+      if (end < n) {
+        await yieldToMain();
+        throwIfAborted(signal);
+      }
     }
   } else {
     const channels: Float32Array[] = [];
@@ -87,7 +103,10 @@ async function mixDownWithStats(
         for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
         tally(v * scale, i);
       }
-      if (end < n) await yieldToMain();
+      if (end < n) {
+        await yieldToMain();
+        throwIfAborted(signal);
+      }
     }
   }
 
@@ -104,8 +123,30 @@ async function mixDownWithStats(
   };
 }
 
-function stereoWidth(buffer: AudioBuffer): number {
-  if (buffer.numberOfChannels < 2) return 0;
+/**
+ * Replace NaN/±Infinity samples with 0 in every channel (chunked, with
+ * yields like the other full-buffer passes). Mutates the decoded buffer in
+ * place — getChannelData returns the live storage — so all downstream
+ * readers (mix-down, stereo width, DSP) see sanitized samples.
+ */
+async function sanitizeNonFinite(buffer: AudioBuffer, signal?: AbortSignal): Promise<void> {
+  const CHUNK = 1 << 20;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c);
+    for (let s = 0; s < data.length; s += CHUNK) {
+      const end = Math.min(data.length, s + CHUNK);
+      for (let i = s; i < end; i++) {
+        if (!Number.isFinite(data[i]!)) data[i] = 0;
+      }
+      if (end < data.length) {
+        await yieldToMain();
+        throwIfAborted(signal);
+      }
+    }
+  }
+}
+
+function stereoWidth(buffer: AudioBuffer): number {  if (buffer.numberOfChannels < 2) return 0;
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
   const n = Math.min(L.length, R.length);
@@ -231,6 +272,7 @@ export async function stftPower(
   start: number,
   end: number,
   onProgress?: (p: number) => void,
+  signal?: AbortSignal,
 ): Promise<{ magDb: Float32Array[]; frames: number; frameRmsDb: Float32Array }> {
   const real = new Float32Array(FFT_SIZE);
   const imag = new Float32Array(FFT_SIZE);
@@ -263,6 +305,7 @@ export async function stftPower(
     if (hopIndex % 24 === 0) {
       onProgress?.(hopIndex / hops);
       await yieldToMain();
+      throwIfAborted(signal);
     }
   }
 
@@ -324,6 +367,7 @@ export async function meanSpectrum(
   frames: Float32Array[],
   nBins: number,
   keep?: boolean[] | null,
+  signal?: AbortSignal,
 ): Promise<Float32Array> {
   const mean = new Float32Array(nBins);
   if (frames.length === 0) return mean;
@@ -337,7 +381,10 @@ export async function meanSpectrum(
       mean[k]! += Math.pow(10, f[k]! / 10);
     }
     used++;
-    if (used % 128 === 0) await yieldToMain();
+    if (used % 128 === 0) {
+      await yieldToMain();
+      throwIfAborted(signal);
+    }
   }
   const inv = 1 / Math.max(1, used);
   for (let k = 0; k < nBins; k++) {
@@ -779,16 +826,24 @@ export async function runDsp(
   clipFraction: number,
   onProgress?: (phase: string, amount: number) => void,
   spans?: DspSpans,
+  signal?: AbortSignal,
 ): Promise<DspResult> {
+  throwIfAborted(signal);
   const regions = spans?.regions ?? pickRegions(mono, sampleRate);
 
   const allFrames: Float32Array[] = [];
   const allRmsDb: number[] = [];
   for (let i = 0; i < regions.length; i++) {
     const region = regions[i]!;
-    const { magDb, frameRmsDb } = await stftPower(mono, region.start, region.end, (p) => {
-      onProgress?.("Spectrum", 0.3 + (0.4 * (i + p)) / regions.length);
-    });
+    const { magDb, frameRmsDb } = await stftPower(
+      mono,
+      region.start,
+      region.end,
+      (p) => {
+        onProgress?.("Spectrum", 0.3 + (0.4 * (i + p)) / regions.length);
+      },
+      signal,
+    );
     allFrames.push(...magDb);
     for (let k = 0; k < frameRmsDb.length; k++) allRmsDb.push(frameRmsDb[k]!);
   }
@@ -800,12 +855,13 @@ export async function runDsp(
     excerpt.start,
     excerpt.end,
     (p) => onProgress?.("Spectrogram", 0.74 + 0.2 * p),
+    signal,
   );
 
   const nBins = FFT_SIZE / 2;
   const frameRms = Float32Array.from(allRmsDb);
   const keep = loudFrameMask(frameRms, allFrames.length);
-  const meanDb = await meanSpectrum(allFrames, nBins, keep);
+  const meanDb = await meanSpectrum(allFrames, nBins, keep, signal);
   const cutoff = await detectCutoff(
     allFrames,
     sampleRate,
@@ -858,11 +914,30 @@ export async function runDsp(
 export async function analyzeFile(
   file: File,
   onProgress?: (phase: string, amount: number) => void,
+  signal?: AbortSignal,
 ): Promise<Analysis> {
+  throwIfAborted(signal);
   onProgress?.("Reading file", 0.05);
+
+  // decodeAudioData materializes the whole PCM buffer in memory — a huge
+  // file is not a slow analysis but a dead tab (especially on ≤4 GB
+  // devices, which OOM on far less). Fail loudly instead.
+  // Memory-constrained devices get a tighter bound: a 200 MB compressed
+  // file is already >1 GB of decoded float on lossless input.
+  const lowMemory =
+    typeof navigator !== "undefined" &&
+    typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === "number" &&
+    (navigator as Navigator & { deviceMemory?: number }).deviceMemory! <= 4;
+  const maxBytes = lowMemory ? 200 * 1024 * 1024 : 600 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(
+      "That file is too large to analyze in a browser. Try a smaller copy (e.g. FLAC instead of WAV).",
+    );
+  }
 
   // Result cache: identical bytes skip decode + DSP entirely.
   const key = await cacheKeyForFile(file);
+  throwIfAborted(signal);
   if (key) {
     const hit = await cacheGet(key);
     if (hit) {
@@ -880,6 +955,7 @@ export async function analyzeFile(
   }
 
   const arrayBuffer = await file.arrayBuffer();
+  throwIfAborted(signal);
   const container = sniffContainer(arrayBuffer, file.name, file.type);
 
   onProgress?.("Decoding", 0.12);
@@ -894,7 +970,13 @@ export async function analyzeFile(
     throw new Error("That file is too short to analyze.");
   }
 
+  // Corrupt-but-decodable files can carry NaN/Infinity samples, which
+  // poison every downstream number into confident-looking "NaN" verdicts.
+  // Zero them once here so tally, stereoWidth and the DSP all agree.
+  await sanitizeNonFinite(audio, signal);
+
   onProgress?.("Measuring", 0.28);
+  throwIfAborted(signal);
   const width = stereoWidth(audio);
 
   // Files over ~15 min would need 600 MB+ of float buffers; analyze slices
@@ -906,8 +988,9 @@ export async function analyzeFile(
   let liteAnalysis = false;
   if (audio.duration > LONG_SEC) {
     liteAnalysis = true;
-    const stats = await mixDownWithStats(audio, false);
+    const stats = await mixDownWithStats(audio, false, signal);
     loud = stats;
+    throwIfAborted(signal);
     const regions = pickRegionsFromBuffer(audio);
     const excerpt = excerptRegion(audio.length, audio.sampleRate);
     const chs: Float32Array[] = [];
@@ -943,10 +1026,11 @@ export async function analyzeFile(
     }
     spans = { regions: localRegions, excerpt: localExcerpt };
   } else {
-    const full = await mixDownWithStats(audio);
+    const full = await mixDownWithStats(audio, true, signal);
     mono = full.mono;
     loud = full;
   }
+  throwIfAborted(signal);
 
   const dsp = await runDspParallel(
     mono,
@@ -954,6 +1038,7 @@ export async function analyzeFile(
     loud.clipFraction,
     onProgress,
     spans,
+    signal,
   );
 
   const containerKbps = audio.duration > 0 ? (file.size * 8) / audio.duration / 1000 : 0;

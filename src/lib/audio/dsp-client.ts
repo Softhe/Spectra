@@ -1,8 +1,11 @@
 // Client for the DSP worker. Same signature/semantics as runDsp; falls back
 // to the main-thread legacy path when workers are unavailable, when
 // ?worker=0 is set (debug hatch), or when the worker fails to boot.
+// An AbortSignal kills the worker outright (never falls back mid-abort).
 import {
+  CancelledError,
   runDsp,
+  throwIfAborted,
   type DspResult,
   type DspSpans,
 } from "./analyze";
@@ -67,10 +70,13 @@ export async function runDspParallel(
   clipFraction: number,
   onProgress?: (phase: string, amount: number) => void,
   spans?: DspSpans,
+  signal?: AbortSignal,
 ): Promise<DspResult> {
+  throwIfAborted(signal);
   if (!(await probeWorker())) {
-    return runDsp(mono, sampleRate, clipFraction, onProgress, spans);
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal);
   }
+  throwIfAborted(signal);
 
   const jobId = ++jobSeq;
   // No transfer: the mono buffer is structured-cloned (~100 ms worst case),
@@ -84,7 +90,7 @@ export async function runDspParallel(
     });
   } catch {
     console.warn("[spectra] worker unavailable, analyzing on main thread");
-    return runDsp(mono, sampleRate, clipFraction, onProgress, spans);
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal);
   }
 
   const active = worker;
@@ -98,8 +104,16 @@ export async function runDspParallel(
         window.clearTimeout(timer);
         active.onmessage = null;
         active.onerror = null;
+        signal?.removeEventListener("abort", onAbort);
         active.terminate();
       };
+      // A superseded or cleared slot must not keep burning a full STFT in
+      // the background: kill the worker the moment the signal fires.
+      const onAbort = () => {
+        cleanup();
+        reject(new CancelledError());
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
       active.onmessage = (e: MessageEvent) => {
         const d = e.data as {
           jobId?: number;
@@ -127,6 +141,11 @@ export async function runDspParallel(
       active.postMessage({ jobId, mono, sampleRate, clipFraction, spans });
     });
   } catch (err) {
+    // A cancelled run is intentional — never resurrect it as main-thread
+    // work (that would exactly duplicate the CPU the abort saved).
+    if (err instanceof CancelledError || signal?.aborted) {
+      throw err instanceof CancelledError ? err : new CancelledError();
+    }
     // A failed worker must never strand an analysis: fall back to the
     // legacy main-thread path (possible because mono was cloned, not
     // transferred). Deterministic DSP bugs surface identically from legacy,
@@ -137,7 +156,7 @@ export async function runDspParallel(
       err instanceof Error ? err.message : "worker failed",
       "— retrying on main thread",
     );
-    return runDsp(mono, sampleRate, clipFraction, onProgress, spans);
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal);
   } finally {
     worker.terminate();
   }

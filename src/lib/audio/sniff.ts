@@ -270,8 +270,91 @@ function parseOgg(bytes: Uint8Array): ContainerInfo | null {
   return { codec: "Ogg", sampleRate: null, channels: null, bitDepth: null, claimedKbps: null, vbr: true };
 }
 
-function fromExt(name: string, mime: string): string {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+/** IEEE 754 80-bit extended float (big-endian) — AIFF COMM sample rates. */
+function readExtended(view: DataView, off: number): number {
+  const se = view.getUint16(off, false);
+  const exp = (se & 0x7fff) - 16383;
+  const hi = view.getUint32(off + 2, false);
+  const lo = view.getUint32(off + 6, false);
+  const mantissa = hi * 4294967296 + lo;
+  return (se & 0x8000 ? -mantissa : mantissa) * Math.pow(2, exp - 63);
+}
+
+const validRate = (hz: number | null): number | null =>
+  hz != null && Number.isFinite(hz) && hz >= 8000 && hz <= 384000 ? hz : null;
+
+// AIFF never carries an MP3 frame-sync pattern in its header region, and its
+// FORM/AIFF magic is specific — but its raw PCM body CAN contain bytes that
+// look like a frame sync, so it must be parsed before parseMp3 gets a turn.
+function parseAiff(bytes: Uint8Array): ContainerInfo | null {
+  if (ascii(bytes, 0, 4) !== "FORM") return null;
+  const form = ascii(bytes, 8, 4);
+  if (form !== "AIFF" && form !== "AIFC") return null;
+  let i = 12;
+  while (i + 8 < bytes.length) {
+    const id = ascii(bytes, i, 4);
+    const size = readU32(bytes, i + 4);
+    if (id === "COMM" && i + 26 <= bytes.length) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const channels = view.getUint16(i + 8, false);
+      const sampleRate = readExtended(view, i + 8 + 6);
+      const bitDepth = view.getUint16(i + 8 + 16, false);      return {
+        codec: "AIFF",
+        sampleRate: validRate(sampleRate),
+        channels: channels >= 1 && channels <= 8 ? channels : null,
+        bitDepth: bitDepth >= 1 && bitDepth <= 64 ? bitDepth : null,
+        claimedKbps: null,
+        vbr: false,
+      };
+    }
+    // Chunks are word-aligned: odd sizes carry one pad byte.
+    i += 8 + size + (size % 2);
+  }
+  return {
+    codec: "AIFF",
+    sampleRate: null,
+    channels: null,
+    bitDepth: null,
+    claimedKbps: null,
+    vbr: false,
+  };
+}
+
+function parseCaf(bytes: Uint8Array): ContainerInfo | null {
+  if (ascii(bytes, 0, 4) !== "caff") return null;
+  // Chunk headers use a big-endian u64 size: 4cc + 8 bytes.
+  let i = 8;
+  while (i + 12 <= bytes.length) {
+    const id = ascii(bytes, i, 4);
+    const size = readU32(bytes, i + 4) * 4294967296 + readU32(bytes, i + 8);
+    if (id === "info" && size >= 28 && i + 12 + 28 <= bytes.length) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const o = i + 12;
+      const sampleRate = view.getFloat64(o, false);
+      const channels = view.getUint32(o + 20, false);
+      const bitDepth = view.getUint32(o + 24, false);
+      return {
+        codec: "CAF",
+        sampleRate: validRate(sampleRate),
+        channels: channels >= 1 && channels <= 8 ? channels : null,
+        bitDepth: bitDepth >= 1 && bitDepth <= 64 ? bitDepth : null,
+        claimedKbps: null,
+        vbr: false,
+      };
+    }
+    i += 12 + size + (size % 2);
+  }
+  return {
+    codec: "CAF",
+    sampleRate: null,
+    channels: null,
+    bitDepth: null,
+    claimedKbps: null,
+    vbr: false,
+  };
+}
+
+function fromExt(name: string, mime: string): string {  const ext = name.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
     mp3: "MP3",
     m4a: "AAC",
@@ -310,6 +393,8 @@ export function sniffContainer(
     parseFlac(bytes) ??
     parseOgg(bytes) ??
     parseMp4(bytes) ??
+    parseAiff(bytes) ??
+    parseCaf(bytes) ??
     parseMp3(bytes);
 
   if (parsed) {

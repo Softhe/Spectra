@@ -66,6 +66,8 @@
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* UA-drawn surfaces (scrollbar, form accents) must match the theme. */
+    color-scheme: dark;
   }
 
   html,

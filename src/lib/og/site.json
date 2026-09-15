@@ -1,4 +1,5 @@
 {
   "title": "Spectra",
+  "description": "Drop two copies of the same song — Spectra reads the audio and shows which one really kept the high frequencies.",
   "card": "custom"
 }

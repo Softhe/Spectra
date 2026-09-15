@@ -148,7 +148,16 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
         </div>
       </div>
       <div ref={wrapRef} className="h-40 w-full sm:h-48">
-        <canvas ref={canvasRef} className="block size-full" />
+        <canvas
+          ref={canvasRef}
+          className="block size-full"
+          role="img"
+          aria-label={
+            a || b
+              ? `Average spectrum plot.${a ? ` File A ceiling ${formatHz(a.cutoffHz)}.` : ""}${b ? ` File B ceiling ${formatHz(b.cutoffHz)}.` : ""}`
+              : "Average spectrum plot"
+          }
+        />
       </div>
       <div className="mt-1 flex justify-between font-mono text-[11px] text-faint">
         <span>0</span>
