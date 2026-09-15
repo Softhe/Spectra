@@ -55,7 +55,7 @@ for (const item of manifest.items) {
   const cls = classifyQuality(det.cutoffHz, item.sr / 2, det.rolloff, det.hfOccupancy,
     { bbFlatness: det.bbFlatness, sourceLimited: det.sourceLimited });
   const cc = crestClip(mono);
-  const score = scoreOf({
+  const { total: score } = scoreOf({
     cutoffHz: det.cutoffHz, nyquistHz: item.sr / 2, rolloff: det.rolloff,
     hfOccupancy: det.hfOccupancy, clipFraction: cc.clipFraction, bbFlatness: det.bbFlatness,
   });
@@ -83,6 +83,7 @@ const mkAnalysis = (name, item) => {
     container: { codec: item.kind === "mp3" ? "MP3" : item.kind === "transcode" || item.kind === "wav" ? "PCM" : item.kind, sampleRate: item.sr, channels: item.ch, bitDepth: 16, claimedKbps: item.kind === "mp3" ? item.kbps : item.kind === "wav" || item.kind === "transcode" ? 1411 : null, vbr: null },
     containerKbps: 0, cutoffHz: r.cutoffHz, nyquistHz: item.sr / 2,
     rolloff: r.rolloff, brickwallHz: null, qualityClass: r.cls, score: r.score,
+    scoreParts: { ceiling: 0, rolloff: 0, air: 0, clarity: 0, clip: 0 },
     sourceLimited: !!r.limited, liteAnalysis: false,
     peakDb: 0, rmsDb: -14, crestDb: 14, clipFraction: 0, stereoWidth: 0,
     hfOccupancy: r.hfOcc, hfSlope: r.hfSlope, meanDb: new Float32Array(), meanDbHzPerBin: 0,

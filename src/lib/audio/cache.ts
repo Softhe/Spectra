@@ -4,8 +4,8 @@
 // objectUrls are per-session and never persisted.
 import type { Analysis } from "./types";
 
-/** Bump whenever detection constants change; old entries are evicted. */
-export const DSP_VERSION = 2;
+/** Bump whenever detection constants OR the stored shape change. */
+export const DSP_VERSION = 3;
 
 const DB_NAME = "spectra-analyses";
 const STORE = "analyses";

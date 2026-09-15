@@ -7,6 +7,7 @@ import type {
   Comparison,
   QualityClass,
   RolloffKind,
+  ScoreParts,
   SlotId,
   SpectrogramData,
 } from "./types";
@@ -601,23 +602,26 @@ export function scoreOf(input: {
   clipFraction: number;
   /** Broadband flatness: starved encodes read ~0.7+, music ≤ 0.15. */
   bbFlatness: number;
-}): number {
+}): { total: number; parts: ScoreParts } {
   // Codec quality only. Mastering traits (dynamics, width, mono) are
   // displayed separately and must not move this number.
-  const ceil = Math.min(1, input.cutoffHz / 20000);
-  let s = ceil * 62;
-  s += input.rolloff === "natural" ? 12 : input.rolloff === "steep" ? 5 : 0;
-  s += Math.min(1, input.hfOccupancy * 2.5) * 14;
-  // Clean-spectrum bonus: tonal HF scores over hashy HF. bbFlatness on the
-  // valid corpus peaks at 0.14, so legit content keeps ~8 of these points.
-  s += 12 * (1 - Math.min(1, input.bbFlatness * 3));
-  // Sustained clipping docks; isolated lossy-decoder overshoots don't count
-  // (they never form runs — see mixDownWithStats).
-  if (input.clipFraction > 0.002) s -= 14;
-  else if (input.clipFraction > 0.0003) s -= 6;
+  const parts: ScoreParts = {
+    ceiling: Math.min(1, input.cutoffHz / 20000) * 62,
+    rolloff: input.rolloff === "natural" ? 12 : input.rolloff === "steep" ? 5 : 0,
+    air: Math.min(1, input.hfOccupancy * 2.5) * 14,
+    // Clean-spectrum bonus: tonal HF scores over hashy HF. bbFlatness on the
+    // valid corpus peaks at 0.14, so legit content keeps ~8 of these points.
+    clarity: 12 * (1 - Math.min(1, input.bbFlatness * 3)),
+    // Sustained clipping docks; isolated lossy-decoder overshoots don't count
+    // (they never form runs — see mixDownWithStats).
+    clip:
+      input.clipFraction > 0.002 ? -14 : input.clipFraction > 0.0003 ? -6 : 0,
+  };
+  let total =
+    parts.ceiling + parts.rolloff + parts.air + parts.clarity + parts.clip;
   // Starved full-band mush: cap hard regardless of ceiling.
-  if (input.bbFlatness > 0.45) s = Math.min(s, 35);
-  return Math.max(0, Math.min(100, s));
+  if (input.bbFlatness > 0.45) total = Math.min(total, 35);
+  return { total: Math.max(0, Math.min(100, total)), parts };
 }
 
 function resampleFramesToDisplay(
@@ -758,6 +762,7 @@ export type DspResult = {
   brickwallHz: number | null;
   qualityClass: QualityClass;
   score: number;
+  scoreParts: ScoreParts;
   sourceLimited: boolean;
   hfOccupancy: number;
   hfSlope: number;
@@ -824,7 +829,7 @@ export async function runDsp(
     (excerpt.end - excerpt.start) / sampleRate,
   );
 
-  const score = scoreOf({
+  const { total: score, parts: scoreParts } = scoreOf({
     cutoffHz: cutoff.cutoffHz,
     nyquistHz,
     rolloff: cutoff.rolloff,
@@ -843,6 +848,7 @@ export async function runDsp(
     brickwallHz: cutoff.brickwallHz,
     qualityClass,
     score,
+    scoreParts,
     sourceLimited: cutoff.sourceLimited,
     hfOccupancy: hfOcc,
     hfSlope: cutoff.hfSlope,
@@ -974,6 +980,7 @@ export async function analyzeFile(
     brickwallHz: dsp.brickwallHz,
     qualityClass: dsp.qualityClass,
     score: dsp.score,
+    scoreParts: dsp.scoreParts,
     sourceLimited: dsp.sourceLimited,
     liteAnalysis,
     peakDb: loud.peakDb,

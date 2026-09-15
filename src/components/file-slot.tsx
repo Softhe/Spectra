@@ -6,6 +6,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import * as Slider from "@radix-ui/react-slider";
 import { useEffect, useRef, useState } from "react";
 import { SpectrogramCanvas } from "@/components/spectrogram-canvas";
 import { Button } from "@/components/ui/button";
@@ -49,6 +50,8 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
   const [over, setOver] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState<string | null>(null);
+  const [position, setPosition] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const label = id === "a" ? "File A" : "File B";
   const trace = id === "a" ? "text-trace-a" : "text-trace-b";
 
@@ -56,6 +59,8 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
   useEffect(() => {
     setPlaying(false);
     setPlayError(null);
+    setPosition(0);
+    setMediaDuration(null);
   }, [readyId]);
 
   // Pause this preview when the other slot starts playing.
@@ -255,12 +260,36 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
               onEnded={() => setPlaying(false)}
               onPause={() => setPlaying(false)}
               onPlay={handlePlay}
+              onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
+              onLoadedMetadata={(e) => {
+                const d = e.currentTarget.duration;
+                if (Number.isFinite(d) && d > 0) setMediaDuration(d);
+              }}
+              onSeeked={(e) => setPosition(e.currentTarget.currentTime)}
               onError={() => {
                 setPlaying(false);
                 setPlayError("Preview failed to load that file.");
               }}
             />
           </div>
+          <SeekBar
+            label={label}
+            position={position}
+            duration={
+              mediaDuration ?? state.analysis.durationSec
+            }
+            onSeek={(t) => {
+              const el = audioRef.current;
+              if (el && Number.isFinite(t)) {
+                try {
+                  el.currentTime = t;
+                } catch {
+                  // Not yet seekable.
+                }
+                setPosition(t);
+              }
+            }}
+          />
           {playError && (
             <p role="alert" className="text-xs text-loss">
               {playError}
@@ -313,6 +342,49 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
         }}
       />
     </section>
+  );
+}
+
+function SeekBar({
+  label,
+  position,
+  duration,
+  onSeek,
+}: {
+  label: string;
+  position: number;
+  duration: number;
+  onSeek: (t: number) => void;
+}) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const clamped = Math.max(0, Math.min(position, safeDuration));
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-10 shrink-0 font-mono text-[11px] text-faint tabular-nums">
+        {formatDuration(clamped)}
+      </span>
+      <Slider.Root
+        value={[clamped]}
+        max={Math.max(safeDuration, 0.01)}
+        step={0.1}
+        disabled={safeDuration <= 0}
+        onValueChange={([v]) => {
+          if (v != null) onSeek(v);
+        }}
+        className="relative flex h-6 flex-1 touch-none items-center disabled:pointer-events-none disabled:opacity-40"
+      >
+        <Slider.Track className="relative h-1 grow rounded-full bg-bg-subtle">
+          <Slider.Range className="absolute h-full rounded-full bg-trace-a" />
+        </Slider.Track>
+        <Slider.Thumb
+          className="block size-3.5 rounded-full bg-fg shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+          aria-label={`Seek ${label} preview`}
+        />
+      </Slider.Root>
+      <span className="w-10 shrink-0 text-right font-mono text-[11px] text-faint tabular-nums">
+        {formatDuration(safeDuration)}
+      </span>
+    </div>
   );
 }
 

@@ -8,6 +8,15 @@ export type QualityClass =
 
 export type RolloffKind = "natural" | "brickwall" | "steep";
 
+/** Per-factor points behind a 0–100 score (clip is ≤ 0). */
+export type ScoreParts = {
+  ceiling: number;
+  rolloff: number;
+  air: number;
+  clarity: number;
+  clip: number;
+};
+
 export type ContainerInfo = {
   codec: string;
   sampleRate: number | null;
@@ -44,12 +53,14 @@ export type Analysis = {
   rolloff: RolloffKind;
   brickwallHz: number | null;
   qualityClass: QualityClass;
+  /** 0–100 composite. */
+  score: number;
+  /** Per-factor points behind `score` (for the breakdown UI). */
+  scoreParts: ScoreParts;
   /** True when the ceiling reflects the music, not an encoder (caps class). */
   sourceLimited: boolean;
   /** True when a very long file was analyzed from excerpts (memory guard). */
   liteAnalysis: boolean;
-  /** 0–100 composite. */
-  score: number;
   peakDb: number;
   rmsDb: number;
   crestDb: number;

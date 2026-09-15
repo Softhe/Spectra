@@ -1,13 +1,13 @@
-import { AudioLines, Info, Pause, Play, Trophy, Volume1, Volume2, VolumeX } from "lucide-react";
+import { AudioLines, Check, Copy, Info, Pause, Play, Trophy, Volume1, Volume2, VolumeX } from "lucide-react";
 import * as Slider from "@radix-ui/react-slider";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { FileSlot, type Outcome, type SlotState } from "@/components/file-slot";
 import { SpectrumPlot } from "@/components/spectrum-plot";
 import { Button } from "@/components/ui/button";
-import { analyzeFile, compareAnalyses } from "@/lib/audio/analyze";
+import { analyzeFile, compareAnalyses, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import { makeDemoFiles } from "@/lib/audio/demo";
-import { formatHz } from "@/lib/audio/format";
-import type { Analysis, Comparison, SlotId } from "@/lib/audio/types";
+import { channelLabel, formatBytes, formatDuration, formatHz, formatSampleRate } from "@/lib/audio/format";
+import type { Analysis, Comparison, ScoreParts, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
 type Slots = { a: SlotState; b: SlotState };
@@ -190,17 +190,78 @@ export function Analyzer() {
   }, []);
 
   // Manual slot playback cancels A/B mode (unless this event IS the switch).
+  // The same event also feeds lock-screen / headset controls (Media Session).
+  const analysesRef = useRef<{ a: Analysis | null; b: Analysis | null }>({ a: null, b: null });
+  analysesRef.current = { a, b };
+  const abPlayingRef = useRef<SlotId | null>(null);
   useEffect(() => {
+    abPlayingRef.current = abPlaying;
+  }, [abPlaying]);
+  // Latest-switch ref: lets the Media Session handlers (subscribed once)
+  // always reach the current abSwitch without re-subscribing.
+  const abSwitchRef = useRef<(target: SlotId) => void>(() => undefined);
+  useEffect(() => {
+    const audios = () =>
+      [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
     const onPlay = (e: Event) => {
+      const id = (e as CustomEvent<SlotId>).detail;
       if (abArmed.current) {
         abArmed.current = false;
-        setAbPlaying((e as CustomEvent<SlotId>).detail);
+        setAbPlaying(id);
       } else {
         setAbPlaying(null);
       }
+      try {
+        if ("mediaSession" in navigator) {
+          const track = id === "a" ? analysesRef.current.a : analysesRef.current.b;
+          if (track) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: track.fileName,
+              artist: `Spectra · File ${id.toUpperCase()}`,
+              album: "Same song, two sources",
+            });
+          }
+        }
+      } catch {
+        // Media Session is best-effort.
+      }
     };
     window.addEventListener("spectra:now-playing", onPlay);
-    return () => window.removeEventListener("spectra:now-playing", onPlay);
+    try {
+      if ("mediaSession" in navigator) {
+        const ms = navigator.mediaSession;
+        ms.setActionHandler("play", () => {
+          const els = audios();
+          // Resume the most recently active preview, else the firstPaused.
+          const target =
+            els.find((el) => el.dataset.slot === abPlayingRef.current) ??
+            els.find((el) => el.paused) ??
+            els[0];
+          if (target) void target.play().catch(() => undefined);
+        });
+        ms.setActionHandler("pause", () => {
+          for (const el of audios()) el.pause();
+        });
+        // Headset prev/next jumps straight between the two copies.
+        ms.setActionHandler("previoustrack", () => abSwitchRef.current("a"));
+        ms.setActionHandler("nexttrack", () => abSwitchRef.current("b"));
+      }
+    } catch {
+      // Media Session is best-effort.
+    }
+    return () => {
+      window.removeEventListener("spectra:now-playing", onPlay);
+      try {
+        if ("mediaSession" in navigator) {
+          for (const action of ["play", "pause", "previoustrack", "nexttrack"] as const) {
+            navigator.mediaSession.setActionHandler(action, null);
+          }
+        }
+      } catch {
+        // Ignore.
+      }
+    };
+    // Subscribed once; headset handlers reach abSwitch through its ref.
   }, []);
 
   // New files invalidate any A/B session and its loudness match.
@@ -326,6 +387,10 @@ export function Analyzer() {
     },
     [volume, fadeOutThenPause],
   );
+
+  useEffect(() => {
+    abSwitchRef.current = abSwitch;
+  });
 
   const outcomeFor = useCallback(
     (id: SlotId): Outcome => {
@@ -481,11 +546,13 @@ function Verdict({
           Same position, matched loudness.
         </span>
         <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
+        <CopyReport comparison={comparison} a={a} b={b} />
       </div>
       <div className="mt-4 grid max-w-3xl gap-3 sm:grid-cols-2">
         <ScoreBar
           label="File A"
           score={a.score}
+          parts={a.scoreParts}
           cutoffHz={a.cutoffHz}
           highlighted={comparison.winner === "a"}
           dimmed={decided && comparison.winner !== "a"}
@@ -493,12 +560,79 @@ function Verdict({
         <ScoreBar
           label="File B"
           score={b.score}
+          parts={b.scoreParts}
           cutoffHz={b.cutoffHz}
           highlighted={comparison.winner === "b"}
           dimmed={decided && comparison.winner !== "b"}
         />
       </div>
     </aside>
+  );
+}
+
+function CopyReport({
+  comparison,
+  a,
+  b,
+}: {
+  comparison: Comparison;
+  a: Analysis;
+  b: Analysis;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef(0);
+
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  async function copy() {
+    const fileLine = (slot: string, x: Analysis) =>
+      [
+        `File ${slot}: ${x.fileName}`,
+        `  container: ${x.container.codec}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${formatSampleRate(x.sampleRate)} ${channelLabel(x.channels)}`,
+        `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, score ${x.score.toFixed(0)}/100`,
+        `  header bitrate: ${x.container.claimedKbps ? `${x.container.claimedKbps} kbps${x.container.vbr ? " VBR" : ""}` : "unknown"}`,
+      ].join("\n");
+    const text = [
+      `Spectra comparison — ${comparison.headline} (${comparison.confidence} confidence)`,
+      comparison.detail,
+      "",
+      fileLine("A", a),
+      fileLine("B", b),
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API unavailable (permissions, insecure context): fallback.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        // Give up silently; the button just won't confirm.
+        document.body.removeChild(ta);
+        return;
+      }
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => void copy()}
+      aria-label="Copy comparison report to clipboard"
+    >
+      {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+      {copied ? "Copied" : "Copy report"}
+    </Button>
   );
 }
 
@@ -552,16 +686,33 @@ function VolumeControl({
 function ScoreBar({
   label,
   score,
+  parts,
   cutoffHz,
   highlighted,
   dimmed,
 }: {
   label: string;
   score: number;
+  parts: ScoreParts;
   cutoffHz: number;
   highlighted: boolean;
   dimmed: boolean;
 }) {
+  // Segments explain the total: bandwidth ceiling, rolloff shape, high-frequency
+  // air, spectral cleanliness. Widths are points of the 0–100 scale.
+  // NOTE: classes must stay full literals — Tailwind cannot see interpolated
+  // opacity suffixes and would purge them.
+  const segClass: Record<"win" | "muted", string[]> = {
+    win: ["bg-win/90", "bg-win/60", "bg-win/35", "bg-win/20"],
+    muted: ["bg-muted/70", "bg-muted/50", "bg-muted/30", "bg-muted/20"],
+  };
+  const segments = [
+    { key: "ceiling", label: "Bandwidth ceiling", pts: parts.ceiling },
+    { key: "rolloff", label: "Rolloff shape", pts: parts.rolloff },
+    { key: "air", label: "High-frequency air", pts: parts.air },
+    { key: "clarity", label: "Spectral cleanliness", pts: parts.clarity },
+  ] as const;
+  const tone = highlighted ? "win" : "muted";
   return (
     <div className={cn(dimmed && "opacity-60")}>
       <div className="flex items-baseline justify-between gap-2">
@@ -571,17 +722,28 @@ function ScoreBar({
         </span>
         <span className="font-mono text-xs text-faint tabular-nums">
           {score.toFixed(0)}/100 · {formatHz(cutoffHz)}
+          {parts.clip < 0 && (
+            <span className="text-loss" title={`Sustained clipping docked ${parts.clip.toFixed(0)} points`}>
+              {" "}({parts.clip.toFixed(0)})
+            </span>
+          )}
         </span>
       </div>
       <div
-        className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-bg-subtle"
+        className="mt-1.5 flex h-1.5 gap-px overflow-hidden rounded-full bg-bg-subtle"
         role="img"
-        aria-label={`${label} quality score ${score.toFixed(0)} out of 100`}
+        aria-label={`${label} quality score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, air ${parts.air.toFixed(0)}, clarity ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
       >
-        <div
-          className={cn("h-full rounded-full", highlighted ? "bg-win" : "bg-muted/60")}
-          style={{ width: `${Math.max(2, Math.min(100, score))}%` }}
-        />
+        {segments.map((s, i) =>
+          s.pts > 0.05 ? (
+            <div
+              key={s.key}
+              title={`${s.label}: ${s.pts.toFixed(1)} pts`}
+              className={cn("h-full rounded-full", segClass[tone]![i])}
+              style={{ width: `${Math.min(100, s.pts)}%` }}
+            />
+          ) : null,
+        )}
       </div>
     </div>
   );
