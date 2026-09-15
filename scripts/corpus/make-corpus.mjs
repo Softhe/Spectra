@@ -1,5 +1,8 @@
 // Builds the MP3 leg of the labeled corpus: synth signals -> MP3 (lamejs) /
 // WAV refs / transcodes -> decoded mono f32 dumped to $CORPUS_DIR/items.
+// (AAC/Opus come from native FFmpeg via encode.sh — the in-browser
+// WebCodecs path never materialized: no testable engine ships an AAC
+// AudioEncoder, so that dead branch was removed.)
 // Run from the repo root (needs the dev server on :8080):
 //   npm install --prefix /tmp/corpus-tools lamejs   # one-time tool install
 //   node scripts/corpus/make-corpus.mjs
@@ -19,20 +22,10 @@ await p.goto(APP_URL, { waitUntil: "domcontentloaded" });
 await p.addScriptTag({ path: LAMEJS_MIN_JS });
 const hasLame = await p.evaluate(() => typeof window.lamejs !== "undefined");
 console.log("lamejs:", hasLame);
-const aacOk = await p.evaluate(async () => {
-  if (typeof AudioEncoder === "undefined") return false;
-  try {
-    const r = await AudioEncoder.isConfigSupported({
-      codec: "mp4a.40.2", sampleRate: 44100, numberOfChannels: 2, bitrate: 128_000,
-    });
-    return r.supported;
-  } catch { return false; }
-});
-console.log("aac-encode:", aacOk);
 if (!hasLame) throw new Error("lamejs failed to load");
 
 // ---- synthesis + encode + decode, all in-page ----
-const items = await p.evaluate(async (aacOk) => {
+const items = await p.evaluate(async () => {
   const SR = 44100, SEC = 8, N = SR * SEC;
   const out = [];
   const push = (name, kind, L, R, meta = {}) => out.push({ name, kind, L: Array.from(L), R: Array.from(R), meta });
@@ -101,43 +94,6 @@ const items = await p.evaluate(async (aacOk) => {
     return concat(chunks, total);
   }
 
-  function adts(frameLen) {
-    const h = new Uint8Array(7);
-    h[0] = 0xFF; h[1] = 0xF1; h[2] = 0x50; // LC, 44.1k, top bits of ch=2
-    h[3] = 0x80 | ((frameLen >> 11) & 3);
-    h[4] = (frameLen >> 3) & 0xFF;
-    h[5] = ((frameLen & 7) << 5) | 0x1F;
-    h[6] = 0xFC;
-    return h;
-  }
-
-  async function aac(L, R, bitrate) {
-    const chunks = [];
-    const enc = new AudioEncoder({ output: (c) => chunks.push(c), error: (e) => { throw e; } });
-    enc.configure({ codec: "mp4a.40.2", sampleRate: SR, numberOfChannels: 2, bitrate });
-    const FR = 1024;
-    for (let i = 0, ts = 0; i < L.length; i += FR, ts += (FR / SR) * 1e6) {
-      const n = Math.min(FR, L.length - i);
-      const data = new Float32Array(n * 2);
-      for (let j = 0; j < n; j++) { data[j] = L[i + j]; data[n + j] = R[i + j]; }
-      enc.encode(new AudioData({ format: "f32-planar", sampleRate: SR, numberOfFrames: n, timestamp: Math.round(ts), data: data.buffer }));
-    }
-    await enc.flush();
-    const parts = []; let total = 0;
-    for (const c of chunks) {
-      const sz = c.byteLength;
-      const raw = new Uint8Array(sz);
-      c.copyTo(raw);
-      const h = adts(sz + 7);
-      const frame = new Uint8Array(7 + sz);
-      frame.set(h, 0); frame.set(raw, 7);
-      parts.push(frame); total += frame.length;
-      c.close();
-    }
-    enc.close();
-    return concat(parts, total);
-  }
-
   function wav(L, R) {
     const buf = new ArrayBuffer(44 + N * 4), v = new DataView(buf);
     const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
@@ -168,7 +124,6 @@ const items = await p.evaluate(async (aacOk) => {
   }
 
   const mp3Rates = [96, 128, 192, 320];
-  const aacRates = aacOk ? [64, 128, 256] : [];
   for (const kind of ["bright", "quiet", "noisy", "sweep"]) {
     const { L, R } = render(kind);
     push(`${kind}-ref`, "wav", L, R);
@@ -181,10 +136,6 @@ const items = await p.evaluate(async (aacOk) => {
     {
       const d = await decode(mp3(L, R, 64, true), "audio/mpeg");
       out.push({ name: `${kind}-mp3-64m`, kind: "mp3", kbps: 64, ...d });
-    }
-    for (const br of aacRates) {
-      const d = await decode(await aac(L, R, br * 1000), "audio/aac");
-      out.push({ name: `${kind}-aac-${br}`, kind: "aac", kbps: br, ...d });
     }
     if (kind === "bright") {
       // transcodes: lossy content in lossless clothing + upconverted MP3.
@@ -201,8 +152,8 @@ const items = await p.evaluate(async (aacOk) => {
       out.push({ name: "bright-mp3128-to-mp3320", kind: "upconvert", ...d });
     }
   }
-  return { items: out, aacOk };
-}, aacOk);
+  return { items: out };
+});
 
 // ---- write bins + manifest ----
 import("node:fs").then(({ writeFileSync }) => {
@@ -222,7 +173,7 @@ import("node:fs").then(({ writeFileSync }) => {
     writeFileSync(`${OUT}/${it.name}.f32`, buf);
     manifest.push({ name: it.name, kind: it.kind, kbps: it.kbps ?? null, sr: it.sr, ch: it.ch, samples: mono.length });
   }
-  writeFileSync(`${CORPUS_DIR}/manifest.json`, JSON.stringify({ aacOk: items.aacOk, items: manifest }, null, 1));
-  console.log(`wrote ${manifest.length} items, aac=${items.aacOk}`);
+  writeFileSync(`${CORPUS_DIR}/manifest.json`, JSON.stringify({ items: manifest }, null, 1));
+  console.log(`wrote ${manifest.length} items`);
 });
 await b.close();

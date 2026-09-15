@@ -218,6 +218,15 @@ export function Analyzer() {
     const seq = ++fadeSeq.current[id];
     const ms = 70;
     const t0 = performance.now();
+    const finish = () => {
+      if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
+      el.pause();
+      try {
+        el.volume = holdVolume;
+      } catch {
+        // Already removed.
+      }
+    };
     const step = () => {
       if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
       const k = 1 - Math.min(1, (performance.now() - t0) / ms);
@@ -230,15 +239,20 @@ export function Analyzer() {
       if (k > 0) {
         requestAnimationFrame(step);
       } else {
-        el.pause();
-        try {
-          el.volume = holdVolume;
-        } catch {
-          // Already removed.
-        }
+        finish();
       }
     };
     requestAnimationFrame(step);
+    // rAF freezes in hidden tabs — without this backstop the old side
+    // would keep playing under the new one indefinitely.
+    window.setTimeout(() => {
+      if (fadeSeq.current[id] !== seq) return;
+      try {
+        if (!el.paused) finish();
+      } catch {
+        // Already removed.
+      }
+    }, 600);
   }, []);
 
   const abSwitch = useCallback(

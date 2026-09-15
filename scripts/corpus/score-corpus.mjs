@@ -6,6 +6,7 @@ import {
   classifyQuality,
   compareAnalyses,
   detectCutoff,
+  loudFrameMask,
   meanSpectrum,
   pickRegions,
   scoreOf,
@@ -48,8 +49,9 @@ for (const item of manifest.items) {
     allFrames.push(...magDb);
     for (let k = 0; k < frameRmsDb.length; k++) allRms.push(frameRmsDb[k]);
   }
-  const meanDb = await meanSpectrum(allFrames, N_BINS);
-  const det = await detectCutoff(allFrames, item.sr, meanDb, Float32Array.from(allRms));
+  const frameRms = Float32Array.from(allRms);
+  const meanDb = await meanSpectrum(allFrames, N_BINS, loudFrameMask(frameRms, allFrames.length));
+  const det = await detectCutoff(allFrames, item.sr, meanDb, frameRms);
   const cls = classifyQuality(det.cutoffHz, item.sr / 2, det.rolloff, det.hfOccupancy,
     { bbFlatness: det.bbFlatness, sourceLimited: det.sourceLimited });
   const cc = crestClip(mono);

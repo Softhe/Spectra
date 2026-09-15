@@ -107,9 +107,18 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
     paint();
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const ro = new ResizeObserver(() => paint());
+    // Window drags fire ResizeObserver dozens of times per second; coalesce
+    // to one repaint per frame (each is a few ms, but they queue up).
+    let raf = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(paint);
+    });
     ro.observe(wrap);
-    return () => ro.disconnect();
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, [a, b, winnerId]);
 
   if (!a && !b) return null;

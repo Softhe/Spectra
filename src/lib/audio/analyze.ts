@@ -290,18 +290,55 @@ export async function stftPower(
   return { magDb, frames: magDb.length, frameRmsDb: Float32Array.from(rmsList) };
 }
 
-export async function meanSpectrum(frames: Float32Array[], nBins: number): Promise<Float32Array> {
+/**
+ * Loud-frame mask: frames within `gateDb` of the loudest are kept; fades,
+ * silence, and MP3 padding are excluded. Returns null (keep everything)
+ * when gating would discard more than 75% — never gate the pool away.
+ */
+export function loudFrameMask(
+  frameRmsDb: Float32Array | null | undefined,
+  frameCount: number,
+  gateDb = 40,
+): boolean[] | null {
+  if (!frameRmsDb || frameRmsDb.length !== frameCount || frameCount === 0) {
+    return null;
+  }
+  let maxRms = -Infinity;
+  for (let i = 0; i < frameRmsDb.length; i++) {
+    if (frameRmsDb[i]! > maxRms) maxRms = frameRmsDb[i]!;
+  }
+  const use = new Array<boolean>(frameCount).fill(false);
+  let usedCount = 0;
+  for (let i = 0; i < frameCount; i++) {
+    if (frameRmsDb[i]! >= maxRms - gateDb) {
+      use[i] = true;
+      usedCount++;
+    }
+  }
+  if (usedCount < Math.max(1, Math.floor(frameCount / 4))) return null;
+  return use;
+}
+
+export async function meanSpectrum(
+  frames: Float32Array[],
+  nBins: number,
+  keep?: boolean[] | null,
+): Promise<Float32Array> {
   const mean = new Float32Array(nBins);
   if (frames.length === 0) return mean;
-  // Average in linear power, then back to dB.
+  // Average in linear power, then back to dB. Quiet frames (fades, padding)
+  // are skipped when a mask is provided so they can't dilute the mean.
+  let used = 0;
   for (let i = 0; i < frames.length; i++) {
+    if (keep && !keep[i]) continue;
     const f = frames[i]!;
     for (let k = 0; k < nBins; k++) {
       mean[k]! += Math.pow(10, f[k]! / 10);
     }
-    if (i % 128 === 127) await yieldToMain();
+    used++;
+    if (used % 128 === 0) await yieldToMain();
   }
-  const inv = 1 / frames.length;
+  const inv = 1 / Math.max(1, used);
   for (let k = 0; k < nBins; k++) {
     mean[k] = 10 * Math.log10(mean[k]! * inv + EPS);
   }
@@ -345,22 +382,12 @@ function occupancyCurve(
   let use: boolean[] | null = null;
   let usedCount = frames.length;
   if (frameRmsDb && frameRmsDb.length === frames.length) {
-    let maxRms = -Infinity;
-    for (let i = 0; i < frameRmsDb.length; i++) {
-      if (frameRmsDb[i]! > maxRms) maxRms = frameRmsDb[i]!;
-    }
     // Never gate everything away: keep at least the loudest 25%.
-    use = new Array(frames.length).fill(false);
-    usedCount = 0;
-    for (let i = 0; i < frames.length; i++) {
-      if (frameRmsDb[i]! >= maxRms - gateDb) {
-        use[i] = true;
-        usedCount++;
-      }
-    }
-    if (usedCount < Math.max(1, Math.floor(frames.length / 4))) {
-      use = null;
-      usedCount = frames.length;
+    const mask = loudFrameMask(frameRmsDb, frames.length, gateDb);
+    if (mask) {
+      use = mask;
+      usedCount = 0;
+      for (let i = 0; i < use.length; i++) if (use[i]) usedCount++;
     }
   }
 
@@ -431,11 +458,21 @@ export async function detectCutoff(
 
   let rolloff: RolloffKind = "natural";
   let brickwallHz: number | null = null;
+  // HF slope first: it confirms (or refutes) what the occupancy wobble
+  // suggests below. Measured 10 → 16 kHz in dB/octave on the mean spectrum.
+  const smDb = smooth(meanDb, 3);
+  const slopeHi = Math.min(16000, nyquist - 100);
+  const slopeOctaves = Math.log2(slopeHi / 10000);
+  const hfSlope =
+    slopeOctaves > 0 ? ((smDb[binAt(slopeHi)] ?? 0) - (smDb[binAt(10000)] ?? 0)) / slopeOctaves : 0;
+
   if (steepest > 0.32 && dropBin * binHz < nyquist - 400) {
     rolloff = "brickwall";
     brickwallHz = dropBin * binHz;
     cutoffHz = brickwallHz;
-  } else if (steepest > 0.16) {
+  } else if (steepest > 0.16 && hfSlope < -6) {
+    // Occupancy dips without a real HF decline are sparse-content wobble
+    // (quiet mixes, stepped tones) — not an encoder rolloff.
     rolloff = "steep";
   }
 
@@ -468,12 +505,6 @@ export async function detectCutoff(
   }
 
   cutoffHz = Math.min(cutoffHz, nyquist);
-
-  const smDb = smooth(meanDb, 3);
-  const a = smDb[binAt(10000)] ?? 0;
-  const b = smDb[binAt(Math.min(16000, nyquist - 100))] ?? 0;
-  const octaves = Math.log2(Math.min(16000, nyquist - 100) / 10000);
-  const hfSlope = octaves > 0 ? (b - a) / octaves : 0;
 
   const lo = binAt(16000);
   const hi = binAt(Math.min(20000, nyquist - 50));
@@ -767,12 +798,14 @@ export async function runDsp(
   );
 
   const nBins = FFT_SIZE / 2;
-  const meanDb = await meanSpectrum(allFrames, nBins);
+  const frameRms = Float32Array.from(allRmsDb);
+  const keep = loudFrameMask(frameRms, allFrames.length);
+  const meanDb = await meanSpectrum(allFrames, nBins, keep);
   const cutoff = await detectCutoff(
     allFrames,
     sampleRate,
     meanDb,
-    Float32Array.from(allRmsDb),
+    frameRms,
   );
   const hfOcc = cutoff.hfOccupancy;
   const nyquistHz = sampleRate / 2;

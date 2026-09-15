@@ -9,6 +9,7 @@ export const DSP_VERSION = 2;
 
 const DB_NAME = "spectra-analyses";
 const STORE = "analyses";
+const SAVED_AT_INDEX = "by-savedAt";
 const MAX_ENTRIES = 50;
 const SAMPLE = 256 * 1024;
 
@@ -63,9 +64,15 @@ function openDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
     try {
       if (typeof indexedDB === "undefined") return resolve(null);
-      const req = indexedDB.open(DB_NAME, 1);
+      const req = indexedDB.open(DB_NAME, 2);
       req.onupgradeneeded = () => {
-        req.result.createObjectStore(STORE, { keyPath: "key" });
+        const db = req.result;
+        const store = db.objectStoreNames.contains(STORE)
+          ? req.transaction!.objectStore(STORE)
+          : db.createObjectStore(STORE, { keyPath: "key" });
+        if (!store.indexNames.contains(SAVED_AT_INDEX)) {
+          store.createIndex(SAVED_AT_INDEX, "savedAt", { unique: false });
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
@@ -112,16 +119,34 @@ export async function cachePut(
     await new Promise<void>((resolve) => {
       const tx = db.transaction(STORE, "readwrite");
       const store = tx.objectStore(STORE);
-      store.put(entry);
-      // LRU eviction: keep the newest MAX_ENTRIES.
-      const all = store.getAll();
-      all.onsuccess = () => {
-        const rows = (all.result as StoredEntry[]).sort(
-          (x, y) => y.savedAt - x.savedAt,
-        );
-        for (const extra of rows.slice(MAX_ENTRIES)) {
-          store.delete(extra.key);
+      // LRU eviction BEFORE the put: delete the oldest entries past budget
+      // via the savedAt index cursor, so the write itself can never be a
+      // victim and we never deserialize the whole store (the old getAll
+      // pulled ~1 MB × entries on every save).
+      const counted = store.count();
+      counted.onsuccess = () => {
+        let over = counted.result - MAX_ENTRIES + 1;
+        if (over <= 0) {
+          store.put(entry);
+          return;
         }
+        const cursorReq = store.index(SAVED_AT_INDEX).openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor || over <= 0) {
+            store.put(entry);
+            return;
+          }
+          cursor.delete();
+          over--;
+          cursor.continue();
+        };
+        cursorReq.onerror = () => {
+          store.put(entry);
+        };
+      };
+      counted.onerror = () => {
+        store.put(entry);
       };
       tx.oncomplete = () => {
         db.close();
