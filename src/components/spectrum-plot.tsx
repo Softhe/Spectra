@@ -123,6 +123,14 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
 
   if (!a && !b) return null;
 
+  // Same axis width the canvas paints (paint() clamps at 22050): labels must
+  // sit at the true frequency positions, not at fixed thirds of the box.
+  const maxHzLabel = Math.max(
+    a?.spectrogram.maxHz ?? 0,
+    b?.spectrogram.maxHz ?? 0,
+    22050,
+  );
+
   return (
     <div className={cn("rounded-lg bg-bg-elevated p-4 sm:p-5", className)}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
@@ -159,10 +167,20 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
           }
         />
       </div>
-      <div className="mt-1 flex justify-between font-mono text-[11px] text-faint">
-        <span>0</span>
-        <span>10 kHz</span>
-        <span>20 kHz</span>
+      {/* Labels sit at the true frequency positions (the axis runs to the
+          spectrogram's maxHz, not exactly 20 kHz), aligned with the 10/20 kHz
+          gridlines drawn above. */}
+      <div className="relative mt-1 h-4 font-mono text-[11px] text-faint">
+        <span className="absolute left-0">0</span>
+        {[10, 20].filter((k) => k * 1000 < maxHzLabel).map((k) => (
+          <span
+            key={k}
+            className="absolute -translate-x-1/2"
+            style={{ left: `${((k * 1000) / maxHzLabel) * 100}%` }}
+          >
+            {k} kHz
+          </span>
+        ))}
       </div>
     </div>
   );

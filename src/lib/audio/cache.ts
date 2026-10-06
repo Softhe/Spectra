@@ -5,7 +5,7 @@
 import type { Analysis } from "./types";
 
 /** Bump whenever detection constants OR the stored shape change. */
-export const DSP_VERSION = 3;
+export const DSP_VERSION = 4;
 
 const DB_NAME = "spectra-analyses";
 const STORE = "analyses";

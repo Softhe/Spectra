@@ -39,7 +39,7 @@ type Props = {
   onClear: () => void;
 };
 
-const ACCEPT = "audio/*,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif,.mp4";
+const ACCEPT = "audio/*,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif,.mp4,.caf,.webm";
 
 /** Cross-slot exclusivity: when one preview starts, the other pauses. */
 const PLAY_EVENT = "spectra:now-playing";

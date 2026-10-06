@@ -16,7 +16,8 @@ const idle: SlotState = { status: "idle" };
 
 // Filename fallback covers OSes that hand drops an empty MIME type (Linux
 // file managers, some Android intents) — a .m4a must never be filtered out.
-const AUDIO_FILE_RE = /audio|mpeg|mp4|m4a|aac|ogg|opus|wav|flac|aiff|aif|caf/i;
+// webm/caf are included because the sniffer parses both (Opus, CAF).
+const AUDIO_FILE_RE = /audio|mpeg|mp4|m4a|aac|ogg|opus|wav|flac|aiff|aif|caf|webm/i;
 
 function analysisOf(s: SlotState): Analysis | null {
   return s.status === "ready" ? s.analysis : null;

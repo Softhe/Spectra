@@ -94,14 +94,47 @@ function parseMp3(bytes: Uint8Array): ContainerInfo | null {
   const xingAt = findAscii(head, "Xing");
   const infoAt = findAscii(head, "Info");
   const vbriAt = findAscii(head, "VBRI");
-  const vbr = xingAt !== -1 || vbriAt !== -1 ? true : infoAt !== -1 ? false : null;
+  const tagged = xingAt !== -1 || infoAt !== -1 || vbriAt !== -1;
+  let vbr: boolean | null =
+    xingAt !== -1 || vbriAt !== -1 ? true : infoAt !== -1 ? false : null;
+
+  let claimedKbps = vbr === true ? null : firstKbps || null;
+  // Tagless VBR (no Xing/Info/VBRI): the first frame alone is a placeholder —
+  // walking real frames and finding differing bitrates is the only honest
+  // answer here, same as for Xing-tagged files. Frame length follows the
+  // Layer III formulas (144 slots MPEG-1, 72 MPEG-2/2.5). Stop on any header
+  // that doesn't parse — a conservative miss keeps the old first-frame claim.
+  if (!tagged && claimedKbps !== null && sampleRate) {
+    const slots = verFlag === "11" ? 144 : 72;
+    const frameLen = (pos: number): number | null => {
+      const b2 = bytes[pos + 2]!;
+      const kbps = table?.[(b2 >> 4) & 0xf] ?? 0;
+      if (!kbps) return null;
+      return Math.floor((slots * kbps * 1000) / sampleRate) + ((b2 >> 1) & 1);
+    };
+    const seen = new Set<number>([firstKbps!]);
+    let pos = offset;
+    for (let f = 0; f < 48 && pos + 4 < bytes.length; f++) {
+      const len = frameLen(pos);
+      if (len === null || len <= 0 || pos + len + 4 > bytes.length) break;
+      pos += len;
+      if (bytes[pos] !== 0xff || (bytes[pos + 1]! & 0xe0) !== 0xe0) break;
+      const next = table?.[(bytes[pos + 2]! >> 4) & 0xf] ?? 0;
+      if (!next) break;
+      seen.add(next);
+    }
+    if (seen.size >= 2) {
+      vbr = true;
+      claimedKbps = null;
+    }
+  }
 
   return {
     codec: "MP3",
     sampleRate,
     channels: channelMode === 3 ? 1 : 2,
     bitDepth: null,
-    claimedKbps: vbr === true ? null : firstKbps || null,
+    claimedKbps,
     vbr,
   };
 }
@@ -196,7 +229,11 @@ function parseMp4(bytes: Uint8Array): ContainerInfo | null {
     codec = "AAC";
   }
   if (findAscii(bytes, "alac") >= 0) codec = "ALAC";
-  if (findAscii(bytes, "Opus") >= 0 || findAscii(bytes, "opus") >= 0) codec = "Opus";
+  // Opus-in-MP4 is identified by the dOps box the spec requires. Matching the
+  // bare word "opus" instead flipped AAC files to "Opus" whenever the word
+  // appeared in metadata (an album literally titled "Opus"), which then made
+  // Safari decode errors blame the wrong codec.
+  if (findAscii(bytes, "dOps") >= 0) codec = "Opus";
 
   let sampleRate: number | null = null;
   let channels: number | null = null;
