@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import {
   classifyQuality,
   compareAnalyses,
+  runDsp,
   scoreOf,
 } from "./analyze.ts";
 import { sniffContainer } from "./sniff.ts";
@@ -197,6 +198,43 @@ describe("compareAnalyses", () => {
     assert.equal(c.winner, "tie");
     assert.match(c.detail, /reflects the music itself/);
   });
+  it("flags a band-limited CAF wrapper like the other lossless shells", () => {
+    const c = compareAnalyses(
+      mkAnalysis({ id: "A", cutoff: 22000, score: 90, codec: "CAF" }),
+      mkAnalysis({ id: "B", cutoff: 16000, score: 62, cls: "standard", codec: "CAF", ckbps: 1200 }),
+    );
+    assert.equal(c.winner, "a");
+    assert.match(c.detail, /CAF .*band-limited/);
+  });
+});
+
+describe("runDsp lite spans", () => {
+  it("labels the spectrogram with the true excerpt position, not the slice offset", async () => {
+    // Mirror analyzeFile's lite path: a concatenated slice buffer whose
+    // excerpt lives locally at 16 s but at 384 s (32% of a 20-min song) in
+    // the original file. The spans must carry the true wall-clock start.
+    const sr = 44100;
+    const win = 4 * sr;
+    const localRegions = [
+      { start: 0, end: win },
+      { start: win, end: win * 2 },
+      { start: win * 2, end: win * 3 },
+      { start: win * 3, end: win * 4 },
+    ];
+    const localExcerpt = { start: win * 4, end: win * 4 + 12 * sr };
+    const mono = new Float32Array(localExcerpt.end);
+    for (let i = 0; i < mono.length; i++) {
+      mono[i] = Math.sin((2 * Math.PI * 440 * i) / sr) * 0.3;
+    }
+    const res = await runDsp(mono, sr, 0, undefined, {
+      regions: localRegions,
+      excerpt: localExcerpt,
+      excerptStartSec: 384,
+      excerptDurSec: 12,
+    });
+    assert.equal(res.spectrogram.excerptStartSec, 384);
+    assert.equal(res.spectrogram.durationSec, 12);
+  });
 });
 
 describe("sniffContainer", () => {
@@ -218,6 +256,80 @@ describe("sniffContainer", () => {
     const r = sniffContainer(u8([...b]), "vbr.mp3", "audio/mpeg");
     assert.equal(r.vbr, true);
     assert.equal(r.claimedKbps, null);
+  });
+  it("walks tagless VBR frames and refuses to carry the placeholder claim", () => {
+    // First frame 320 kbps (144·320000/44100 → 1044-byte stride), data frames
+    // at 128 kbps (417-byte stride), no Xing/Info/VBRI anywhere.
+    const b = new Uint8Array(8192);
+    const frame = (off: number, idx: number) => {
+      b[off] = 0xff;
+      b[off + 1] = 0xfb;
+      b[off + 2] = idx << 4;
+      b[off + 3] = 0xc4;
+    };
+    frame(0, 0xe); // 320 kbps placeholder
+    frame(1044, 0x9); // 128 kbps real data
+    frame(1044 + 417, 0x9);
+    frame(1044 + 2 * 417, 0x9);
+    const r = sniffContainer(u8([...b]), "song.mp3", "audio/mpeg");
+    assert.equal(r.vbr, true);
+    assert.equal(r.claimedKbps, null);
+  });
+  it("keeps a tagless CBR claim when the walk confirms one bitrate", () => {
+    const b = new Uint8Array(8192);
+    const frame = (off: number, idx: number) => {
+      b[off] = 0xff;
+      b[off + 1] = 0xfb;
+      b[off + 2] = idx << 4;
+      b[off + 3] = 0xc4;
+    };
+    let pos = 0;
+    for (let f = 0; f < 20; f++) {
+      frame(pos, 0x9); // 128 kbps throughout (417-byte stride)
+      pos += 417;
+    }
+    const r = sniffContainer(u8([...b]), "song.mp3", "audio/mpeg");
+    assert.equal(r.claimedKbps, 128);
+    assert.equal(r.vbr, null);
+  });
+  it("reads Opus-in-MP4 via dOps, not stray metadata text", () => {
+    // M4A whose ©nam metadata literally says "Opus" but whose track is AAC.
+    const b = new Uint8Array(2048);
+    const view = new DataView(b.buffer);
+    const w32 = (v: number, o: number) => view.setUint32(o, v, false);
+    const str = (s: string, o: number) => {
+      for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i);
+    };
+    w32(2048, 0);
+    str("ftypM4A ", 4);
+    w32(64, 100);
+    str("moov", 104);
+    w32(40, 148);
+    str("udta", 152);
+    w32(32, 188);
+    str("\xa9nam", 192);
+    str("Opus (Mixed)", 200);
+    const r = sniffContainer(u8([...b]), "album.m4a", "audio/mp4");
+    assert.equal(r.codec, "AAC");
+  });
+  it("calls a real Opus-in-MP4 track Opus", () => {
+    const b = new Uint8Array(512);
+    const view = new DataView(b.buffer);
+    const w32 = (v: number, o: number) => view.setUint32(o, v, false);
+    const str = (s: string, o: number) => {
+      for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i);
+    };
+    w32(512, 0);
+    str("ftypM4A ", 4);
+    w32(64, 100);
+    str("moov", 104);
+    w32(40, 148);
+    str("trak", 152);
+    // Sample entry "Opus" + the spec-required dOps box.
+    str("Opus", 200);
+    str("dOps", 240);
+    const r = sniffContainer(u8([...b]), "song.m4a", "audio/mp4");
+    assert.equal(r.codec, "Opus");
   });
   it("takes the MP4 average bitrate, not the max", () => {
     const b = new Uint8Array(256);

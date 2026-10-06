@@ -797,7 +797,17 @@ async function decodeNative(
   }
 }
 
-export type DspSpans = { regions: Region[]; excerpt: Region };
+export type DspSpans = {
+  regions: Region[];
+  excerpt: Region;
+  /**
+   * True excerpt position/duration in the ORIGINAL file. The lite path feeds
+   * a concatenated slice buffer, so local offsets would place the
+   * spectrogram's time axis at the wrong wall-clock position.
+   */
+  excerptStartSec?: number;
+  excerptDurSec?: number;
+};
 
 export type DspResult = {
   meanDb: Float32Array;
@@ -857,7 +867,6 @@ export async function runDsp(
     (p) => onProgress?.("Spectrogram", 0.74 + 0.2 * p),
     signal,
   );
-
   const nBins = FFT_SIZE / 2;
   const frameRms = Float32Array.from(allRmsDb);
   const keep = loudFrameMask(frameRms, allFrames.length);
@@ -881,8 +890,10 @@ export async function runDsp(
   const spectrogram = resampleFramesToDisplay(
     excerptFrames,
     sampleRate,
-    excerpt.start / sampleRate,
-    (excerpt.end - excerpt.start) / sampleRate,
+    // Lite path: the local offset is meaningless wall-clock-wise — the spans
+    // carry the true position in the original file.
+    spans?.excerptStartSec ?? excerpt.start / sampleRate,
+    spans?.excerptDurSec ?? (excerpt.end - excerpt.start) / sampleRate,
   );
 
   const { total: score, parts: scoreParts } = scoreOf({
@@ -1024,7 +1035,15 @@ export async function analyzeFile(
       mono.set(part, p);
       p += part.length;
     }
-    spans = { regions: localRegions, excerpt: localExcerpt };
+    // The display buffer is a concatenation, so its local offsets say nothing
+    // about where the spectrogram excerpt lives in the song — pass the true
+    // wall-clock position for the time axis.
+    spans = {
+      regions: localRegions,
+      excerpt: localExcerpt,
+      excerptStartSec: excerpt.start / audio.sampleRate,
+      excerptDurSec: (excerpt.end - excerpt.start) / audio.sampleRate,
+    };
   } else {
     const full = await mixDownWithStats(audio, true, signal);
     mono = full.mono;
@@ -1150,7 +1169,8 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
       : "";
 
   const claimed = worse.container.claimedKbps;
-  const losslessWrap = /FLAC|PCM|ALAC|WAV|AIFF/i.test(worse.container.codec);
+  // CAF belongs here with FLAC/WAV: sniff.ts parses it and it is lossless.
+  const losslessWrap = /FLAC|PCM|ALAC|WAV|AIFF|CAF/i.test(worse.container.codec);
   // A lossless wrapper around band-limited audio is always worth flagging;
   // a lossy header only when it claims high bitrate for low measured class.
   const mismatch = losslessWrap
