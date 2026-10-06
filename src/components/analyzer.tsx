@@ -14,9 +14,10 @@ type Slots = { a: SlotState; b: SlotState };
 
 const idle: SlotState = { status: "idle" };
 
-// Filename fallback covers OSes that hand drops an empty MIME type (Linux
-// file managers, some Android intents) — a .m4a must never be filtered out.
-// webm/caf are included because the sniffer parses both (Opus, CAF).
+// Filename fallback covers OSes that hand drops a non-audio MIME type
+// (Linux file managers and email clients serve application/octet-stream),
+// not just an empty one — a .m4a must never be filtered out. Type and name
+// are tested independently: a bad MIME must not hide a known extension.
 const AUDIO_FILE_RE = /audio|mpeg|mp4|m4a|aac|ogg|opus|wav|flac|aiff|aif|caf|webm/i;
 
 function analysisOf(s: SlotState): Analysis | null {
@@ -147,8 +148,8 @@ export function Analyzer() {
   const onWindowDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
-      const files = [...e.dataTransfer.files].filter((f) =>
-        AUDIO_FILE_RE.test(f.type || f.name),
+      const files = [...e.dataTransfer.files].filter(
+        (f) => AUDIO_FILE_RE.test(f.type) || AUDIO_FILE_RE.test(f.name),
       );
       if (files.length === 0) {
         showDropNotice("That doesn't look like an audio file — try MP3, M4A, WAV, FLAC, OGG or AIFF.");
