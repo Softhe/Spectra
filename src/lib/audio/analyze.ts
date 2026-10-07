@@ -764,7 +764,11 @@ async function decodeNative(
     return decodeBuffer(ctx, bytes);
   };
 
-  const candidates = [sampleRateHint, 44100, 48000].filter(
+  // Fallback rates are tried highest-first: if the container's reported rate
+  // can't be honored and a resample is unavoidable, 48 kHz keeps everything
+  // the file had up to 24 kHz, while decoding a wide file at 44.1 kHz would
+  // silently discard content above 22 kHz. Upsampling 44.1→48 costs only CPU.
+  const candidates = [sampleRateHint, 48000, 44100].filter(
     (v, i, a): v is number => typeof v === "number" && v >= 8000 && a.indexOf(v) === i,
   );
 

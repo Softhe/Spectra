@@ -237,6 +237,23 @@ describe("runDsp lite spans", () => {
   });
 });
 
+describe("makeDemoFiles", () => {
+  it("renders byte-identical files every call so the result cache bites", async () => {
+    // Repeat "Load a demo comparison" resolves through the IndexedDB cache
+    // only when the seeded render produces the same bytes each time.
+    const { makeDemoFiles } = await import("./demo.ts");
+    const [first, second] = await Promise.all([makeDemoFiles(), makeDemoFiles()]);
+    const [a1, a2] = [await first.a.arrayBuffer(), await second.a.arrayBuffer()];
+    const [b1, b2] = [await first.b.arrayBuffer(), await second.b.arrayBuffer()];
+    assert.ok(a1.byteLength > 1_000_000);
+    assert.ok(Buffer.from(a1).equals(Buffer.from(a2)), "demo master bytes differ between calls");
+    assert.ok(Buffer.from(b1).equals(Buffer.from(b2)), "demo rip bytes differ between calls");
+    // And they really are well-formed PCM WAVs (RIFF/WAVE, 44.1 kHz stereo).
+    assert.equal(String.fromCharCode(...new Uint8Array(a1, 0, 4)), "RIFF");
+    assert.equal(String.fromCharCode(...new Uint8Array(a1, 8, 4)), "WAVE");
+  });
+});
+
 describe("sniffContainer", () => {
   const u8 = (arr: number[]) => new Uint8Array(arr).buffer;
   it("reads CBR MP3 headers, ignores deep false Xing hits", () => {

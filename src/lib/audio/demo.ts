@@ -12,6 +12,22 @@ function saw(phase: number): number {
   return 2 * (phase - Math.floor(phase)) - 1;
 }
 
+// Fixed-seed PRNG: the demo renders byte-identical files on every click, so
+// the IndexedDB result cache makes repeat "Load a demo comparison" resolves
+// instant instead of re-analyzing fresh random audio, and QA captures of the
+// demo stay reproducible. Seeded per invocation, not shared module state, so
+// overlapping renders never split one stream's output mid-sequence.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 function env(t: number, attack: number, decay: number): number {
   if (t < 0) return 0;
   if (t < attack) return t / attack;
@@ -19,6 +35,7 @@ function env(t: number, attack: number, decay: number): number {
 }
 
 async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array }> {
+  const rand = mulberry32(0x5aba1e);
   const n = Math.floor(SR * SECONDS);
   const left = new Float32Array(n);
   const right = new Float32Array(n);
@@ -49,7 +66,7 @@ async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array
       (saw(ph1) * 0.11 + saw(ph2) * 0.09 + saw(ph3) * 0.08 + saw(ph4) * 0.06) *
       (0.55 + 0.45 * Math.sin(2 * Math.PI * 0.125 * t));
 
-    const white = Math.random() * 2 - 1;
+    const white = rand() * 2 - 1;
     pink = 0.97 * pink + 0.03 * white;
     const air = pink * 0.05;
     const hat = white * env(hatT, 0.001, 28) * (bar < 1 ? 0.38 : 0.22);
