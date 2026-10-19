@@ -5,7 +5,7 @@
 import type { Analysis } from "./types";
 
 /** Bump whenever detection constants OR the stored shape change. */
-export const DSP_VERSION = 4;
+export const DSP_VERSION = 5;
 
 const DB_NAME = "spectra-analyses";
 const STORE = "analyses";
@@ -21,9 +21,7 @@ type StoredEntry = {
 };
 
 function hex(bytes: ArrayBuffer): string {
-  return [...new Uint8Array(bytes)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /** FNV-1a 32-bit — weak, but only ever used when crypto.subtle is absent. */
@@ -64,15 +62,10 @@ export async function cacheKeyForFile(file: File): Promise<string | null> {
     // crypto.subtle; falling back to null would silently disable the
     // identical-file tie, so degrade to a sampled FNV key instead.
     if (typeof crypto?.subtle?.digest !== "function") {
-      const tag = new TextEncoder().encode(
-        `${file.name}\u0000${file.lastModified}\u0000`,
-      );
+      const tag = new TextEncoder().encode(`${file.name}\u0000${file.lastModified}\u0000`);
       return `v${DSP_VERSION}:w:${fnv1a(tag)}:${fnv1a(joined)}`;
     }
-    const digest = await crypto.subtle.digest(
-      "SHA-256",
-      joined.buffer as ArrayBuffer,
-    );
+    const digest = await crypto.subtle.digest("SHA-256", joined.buffer as ArrayBuffer);
     return `v${DSP_VERSION}:${hex(digest)}`;
   } catch {
     return null;
@@ -104,18 +97,30 @@ function openDb(): Promise<IDBDatabase | null> {
   });
 }
 
-export async function cacheGet(
-  key: string,
-): Promise<StoredEntry["analysis"] | null> {
+export async function cacheGet(key: string): Promise<StoredEntry["analysis"] | null> {
   try {
     const db = await openDb();
     if (!db) return null;
     const entry: StoredEntry | undefined = await new Promise((resolve) => {
-      const tx = db.transaction(STORE, "readonly");
-      const req = tx.objectStore(STORE).get(key);
-      req.onsuccess = () => resolve(req.result as StoredEntry | undefined);
-      req.onerror = () => resolve(undefined);
-      tx.oncomplete = () => db.close();
+      // Every exit (success, request error, tx error/abort, a synchronous
+      // throw) settles the promise and closes the DB — a read never hangs.
+      let result: StoredEntry | undefined;
+      const finish = () => {
+        db.close();
+        resolve(result);
+      };
+      try {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(key);
+        req.onsuccess = () => {
+          result = req.result as StoredEntry | undefined;
+        };
+        tx.oncomplete = finish;
+        tx.onerror = finish;
+        tx.onabort = finish;
+      } catch {
+        finish();
+      }
     });
     if (!entry || entry.version !== DSP_VERSION) return null;
     return entry.analysis;
@@ -124,10 +129,7 @@ export async function cacheGet(
   }
 }
 
-export async function cachePut(
-  key: string,
-  analysis: Analysis,
-): Promise<void> {
+export async function cachePut(key: string, analysis: Analysis): Promise<void> {
   try {
     const db = await openDb();
     if (!db) return;
@@ -139,7 +141,19 @@ export async function cachePut(
       analysis: { ...rest, objectUrl: "" },
     };
     await new Promise<void>((resolve) => {
-      const tx = db.transaction(STORE, "readwrite");
+      // A quota failure ABORTS the transaction (no error event on the tx), so
+      // complete, error and abort all settle; close() is idempotent.
+      const finish = () => {
+        db.close();
+        resolve();
+      };
+      let tx: IDBTransaction;
+      try {
+        tx = db.transaction(STORE, "readwrite");
+      } catch {
+        finish();
+        return;
+      }
       const store = tx.objectStore(STORE);
       // LRU eviction BEFORE the put: delete the oldest entries past budget
       // via the savedAt index cursor, so the write itself can never be a
@@ -160,10 +174,13 @@ export async function cachePut(
             return;
           }
           // Entries from an older DSP_VERSION can never be read again —
-          // they are dead weight, not history. Free them first and they do
-          // not even count against the budget.
+          // they are dead weight, not history. They predate every current
+          // entry (versions only bump on deploy), so the savedAt cursor frees
+          // them first; each was in the count, so it pays down `over` too
+          // instead of costing a current entry its slot.
           if ((cursor.value as StoredEntry | undefined)?.version !== DSP_VERSION) {
             cursor.delete();
+            over--;
             cursor.continue();
             return;
           }
@@ -182,14 +199,9 @@ export async function cachePut(
       counted.onerror = () => {
         store.put(entry);
       };
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      tx.onerror = () => {
-        db.close();
-        resolve();
-      };
+      tx.oncomplete = finish;
+      tx.onerror = finish;
+      tx.onabort = finish;
     });
   } catch {
     // Quota or privacy mode: analysis just re-runs next time.

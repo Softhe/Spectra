@@ -1,11 +1,31 @@
 // Synthesizes corpus WAVs with node (no browser). Run: node scripts/corpus/gen-wavs.mjs
+//
+// Outputs (all deterministic, seeded; 16-bit stereo PCM):
+//   wav/{bright,quiet,noisy,sweep}.wav      44.1 kHz, 8 s  (original corpus — byte-identical)
+//   wav/{bright,quiet,noisy,sweep}-48k.wav  48 kHz,   8 s  (48 kHz grading calibration)
+//   wav/bright-long.wav                     44.1 kHz, 40 s (quiet intro + fade-out, so the
+//                                           >20 s loudness-ranked region picker matters)
 import { mkdirSync, writeFileSync } from "node:fs";
 
 const CORPUS_DIR = process.env.CORPUS_DIR || "/tmp/corpus";
-const SR = 44100, SEC = 8, N = SR * SEC;
 mkdirSync(`${CORPUS_DIR}/wav`, { recursive: true });
 
-function render(kind) {
+// Envelope of bright-long (seconds). Mirrored in score-corpus.mjs (LONG_ENV):
+// every region the >20 s picker keeps must lie in [LOUD_FROM, LOUD_TO].
+const LONG = { sec: 40, introEnd: 6, loudFrom: 8, loudTo: 33, introGain: 0.03 };
+
+function longGain(t) {
+  if (t < LONG.introEnd) return LONG.introGain; // ≈ −30 dB quiet intro
+  if (t < LONG.loudFrom) {
+    const f = (t - LONG.introEnd) / (LONG.loudFrom - LONG.introEnd);
+    return LONG.introGain + (1 - LONG.introGain) * f; // fade in
+  }
+  if (t < LONG.loudTo) return 1;
+  return Math.max(0, 1 - (t - LONG.loudTo) / (LONG.sec - LONG.loudTo)); // fade out to silence
+}
+
+function render(kind, SR = 44100, SEC = 8, gainAt = null) {
+  const N = SR * SEC;
   const L = new Float32Array(N), R = new Float32Array(N);
   let pink = 0, ph = 0;
   // Deterministic PRNG (mulberry32) so the corpus is reproducible.
@@ -48,13 +68,19 @@ function render(kind) {
       s += Math.sin(2 * Math.PI * 440 * t) * 0.05;
       spread = s * 0.05;
     }
+    // Only the long variant is enveloped: the 8 s outputs keep the exact
+    // original arithmetic (no multiply), so they stay byte-identical.
+    if (gainAt) {
+      const g = gainAt(t);
+      s *= g; spread *= g;
+    }
     L[i] = Math.max(-1, Math.min(1, s + spread));
     R[i] = Math.max(-1, Math.min(1, s - spread));
   }
-  return { L, R };
+  return { L, R, SR, N };
 }
 
-function wavBytes(L, R) {
+function wavBytes({ L, R, SR, N }) {
   const buf = Buffer.alloc(44 + N * 4);
   buf.write("RIFF", 0); buf.writeUInt32LE(36 + N * 4, 4); buf.write("WAVE", 8);
   buf.write("fmt ", 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
@@ -69,8 +95,11 @@ function wavBytes(L, R) {
   return buf;
 }
 
-for (const kind of ["bright", "quiet", "noisy", "sweep"]) {
-  const { L, R } = render(kind);
-  writeFileSync(`${CORPUS_DIR}/wav/${kind}.wav`, wavBytes(L, R));
-  console.log("wrote", kind);
-}
+const out = (name, sig) => {
+  writeFileSync(`${CORPUS_DIR}/wav/${name}.wav`, wavBytes(sig));
+  console.log("wrote", name, `sr=${sig.SR}`, `sec=${sig.N / sig.SR}`);
+};
+
+for (const kind of ["bright", "quiet", "noisy", "sweep"]) out(kind, render(kind));
+for (const kind of ["bright", "quiet", "noisy", "sweep"]) out(`${kind}-48k`, render(kind, 48000));
+out("bright-long", render("bright", 44100, LONG.sec, longGain));

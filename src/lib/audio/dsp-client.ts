@@ -6,6 +6,7 @@ import {
   CancelledError,
   runDsp,
   throwIfAborted,
+  type DspOptions,
   type DspResult,
   type DspSpans,
 } from "./analyze";
@@ -71,10 +72,11 @@ export async function runDspParallel(
   onProgress?: (phase: string, amount: number) => void,
   spans?: DspSpans,
   signal?: AbortSignal,
+  options?: DspOptions,
 ): Promise<DspResult> {
   throwIfAborted(signal);
   if (!(await probeWorker())) {
-    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal);
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal, options);
   }
   throwIfAborted(signal);
 
@@ -90,7 +92,7 @@ export async function runDspParallel(
     });
   } catch {
     console.warn("[spectra] worker unavailable, analyzing on main thread");
-    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal);
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal, options);
   }
 
   const active = worker;
@@ -138,7 +140,7 @@ export async function runDspParallel(
         cleanup();
         reject(new Error("Analysis worker failed to start."));
       };
-      active.postMessage({ jobId, mono, sampleRate, clipFraction, spans });
+      active.postMessage({ jobId, mono, sampleRate, clipFraction, spans, options });
     });
   } catch (err) {
     // A cancelled run is intentional — never resurrect it as main-thread
@@ -156,7 +158,7 @@ export async function runDspParallel(
       err instanceof Error ? err.message : "worker failed",
       "— retrying on main thread",
     );
-    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal);
+    return runDsp(mono, sampleRate, clipFraction, onProgress, spans, signal, options);
   } finally {
     worker.terminate();
   }

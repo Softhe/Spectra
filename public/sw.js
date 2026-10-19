@@ -7,9 +7,64 @@
  *    so a reloaded-offline tab restores instantly on the next file drop).
  *  - scripts / styles / fonts / images / worker: cache-first, then network
  *    with the fresh copy stored for next time.
+ *  - only ok (2xx) responses are ever stored, so a 5xx/404 page can never
+ *    become the offline shell.
+ *  - growth is bounded: every deploy ships new hashed asset names, so the
+ *    cache is trimmed oldest-first to MAX_ENTRIES (on activate, and after
+ *    writes inside the fetch event's lifetime via waitUntil). Revalidation
+ *    re-puts each asset it serves, which moves it to the back of the
+ *    insertion order — the trim is effectively LRU, and the "/" shell is
+ *    never evicted.
  * Bump CACHE when the shell contract changes.
  */
-const CACHE = "spectra-shell-v1";
+const CACHE = "spectra-shell-v2";
+const MAX_ENTRIES = 80;
+
+async function trimCache() {
+  const cache = await caches.open(CACHE);
+  const keys = await cache.keys(); // insertion order: oldest first
+  const shellUrl = new URL("/", self.location.origin).href;
+  const evictable = keys.filter((req) => req.url !== shellUrl);
+  const excess = keys.length - MAX_ENTRIES;
+  if (excess <= 0) return;
+  await Promise.all(evictable.slice(0, excess).map((req) => cache.delete(req)));
+}
+
+// Coalesce trims: a page load stores dozens of assets in one burst. One
+// trim runs at a time; puts that land while it runs request one more pass
+// instead of starting their own. Every caller hands the returned promise to
+// event.waitUntil, so the worker stays alive until the trim has finished
+// (a bare timer could be killed with the worker before it ever fired).
+let trimming = null;
+let trimAgain = false;
+function requestTrim() {
+  if (trimming) {
+    trimAgain = true;
+    return trimming;
+  }
+  trimming = (async () => {
+    try {
+      do {
+        trimAgain = false;
+        await trimCache();
+      } while (trimAgain);
+    } catch {
+      // Best-effort: the next write retries.
+    } finally {
+      trimming = null;
+    }
+  })();
+  return trimming;
+}
+
+/** Store an ok response, then trim. Pass the result to event.waitUntil. */
+function store(cache, request, response) {
+  if (!response || !response.ok) return Promise.resolve();
+  return cache
+    .put(request, response.clone())
+    .then(requestTrim)
+    .catch(() => undefined);
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -31,6 +86,7 @@ self.addEventListener("activate", (event) => {
     (async () => {
       const keys = await caches.keys();
       await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+      await trimCache().catch(() => undefined);
       await self.clients.claim();
     })(),
   );
@@ -53,8 +109,8 @@ self.addEventListener("fetch", (event) => {
       (async () => {
         try {
           const fresh = await fetch(request);
-          const cache = await caches.open(CACHE);
-          cache.put(request, fresh.clone()).catch(() => undefined);
+          // Only a healthy page may become the offline shell.
+          if (fresh.ok) event.waitUntil(store(await caches.open(CACHE), request, fresh));
           return fresh;
         } catch {
           const cache = await caches.open(CACHE);
@@ -75,16 +131,16 @@ self.addEventListener("fetch", (event) => {
       const cached = await cache.match(request);
       if (cached) {
         // Revalidate quietly; the cached copy renders instantly either way.
-        fetch(request)
-          .then((fresh) => {
-            if (fresh && fresh.ok) cache.put(request, fresh.clone()).catch(() => undefined);
-          })
-          .catch(() => undefined);
+        event.waitUntil(
+          fetch(request)
+            .then((fresh) => store(cache, request, fresh))
+            .catch(() => undefined),
+        );
         return cached;
       }
       try {
         const fresh = await fetch(request);
-        if (fresh && fresh.ok) cache.put(request, fresh.clone()).catch(() => undefined);
+        event.waitUntil(store(cache, request, fresh));
         return fresh;
       } catch {
         return Response.error();
@@ -92,4 +148,3 @@ self.addEventListener("fetch", (event) => {
     })(),
   );
 });
-
