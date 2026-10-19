@@ -1,8 +1,10 @@
 // DSP worker: runs the pure analysis core (runDsp) off the main thread.
-// Decode stays on main (AudioBuffer is not transferable); the mono mix
-// crosses threads once via transferables. Progress maps 1:1 onto the
+// Decode stays on main (AudioBuffer is not transferable); the mono mix is
+// structured-cloned in (not transferred, so the client keeps a usable copy
+// for its main-thread fallback), and the result's large buffers are
+// transferred back. Progress maps 1:1 onto the
 // onProgress callback used by the legacy main-thread path.
-import { runDsp, type DspSpans } from "./analyze";
+import { runDsp, type DspOptions, type DspSpans } from "./analyze";
 
 type AnalyzeMessage = {
   jobId: number;
@@ -10,6 +12,7 @@ type AnalyzeMessage = {
   sampleRate: number;
   clipFraction: number;
   spans?: DspSpans;
+  options?: DspOptions;
 };
 
 type WorkerScope = {
@@ -20,7 +23,7 @@ type WorkerScope = {
 const scope = self as unknown as WorkerScope;
 
 scope.onmessage = async (e: MessageEvent<AnalyzeMessage>) => {
-  const { jobId, mono, sampleRate, clipFraction, spans } = e.data;
+  const { jobId, mono, sampleRate, clipFraction, spans, options } = e.data;
   const post = scope.postMessage.bind(scope);
   // Capability ping (no transferables): proves module workers execute here.
   if ((e.data as { ping?: boolean }).ping) {
@@ -36,11 +39,10 @@ scope.onmessage = async (e: MessageEvent<AnalyzeMessage>) => {
         post({ jobId, type: "progress", phase, amount });
       },
       spans,
+      undefined,
+      options,
     );
-    post({ jobId, type: "done", result }, [
-      result.meanDb.buffer,
-      result.spectrogram.frames.buffer,
-    ]);
+    post({ jobId, type: "done", result }, [result.meanDb.buffer, result.spectrogram.frames.buffer]);
   } catch (err) {
     post({
       jobId,

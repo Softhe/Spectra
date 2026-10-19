@@ -1,24 +1,42 @@
-import { AudioLines, Check, Copy, Info, Pause, Play, Trophy, Volume1, Volume2, VolumeX } from "lucide-react";
+import {
+  ArrowLeftRight,
+  AudioLines,
+  Check,
+  Copy,
+  Info,
+  Play,
+  Trophy,
+  Volume1,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import * as Slider from "@radix-ui/react-slider";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
 import { FileSlot, type Outcome, type SlotState } from "@/components/file-slot";
 import { SpectrumPlot } from "@/components/spectrum-plot";
 import { Button } from "@/components/ui/button";
-import { analyzeFile, CancelledError, compareAnalyses, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
+import {
+  analyzeFile,
+  CancelledError,
+  compareAnalyses,
+  QUALITY_LABEL,
+  ROLLOFF_LABEL,
+} from "@/lib/audio/analyze";
 import { makeDemoFiles } from "@/lib/audio/demo";
-import { channelLabel, formatBytes, formatDuration, formatHz, formatSampleRate } from "@/lib/audio/format";
+import {
+  channelLabel,
+  formatBytes,
+  formatDuration,
+  formatHz,
+  formatSampleRate,
+} from "@/lib/audio/format";
 import type { Analysis, Comparison, ScoreParts, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
 type Slots = { a: SlotState; b: SlotState };
 
 const idle: SlotState = { status: "idle" };
-
-// Filename fallback covers OSes that hand drops a non-audio MIME type
-// (Linux file managers and email clients serve application/octet-stream),
-// not just an empty one — a .m4a must never be filtered out. Type and name
-// are tested independently: a bad MIME must not hide a known extension.
-const AUDIO_FILE_RE = /audio|mpeg|mp4|m4a|aac|ogg|opus|wav|flac|aiff|aif|caf|webm/i;
 
 function analysisOf(s: SlotState): Analysis | null {
   return s.status === "ready" ? s.analysis : null;
@@ -58,7 +76,10 @@ export function Analyzer() {
   const [demoBusy, setDemoBusy] = useState(false);
   const gens = useRef({ a: 0, b: 0 });
   const urls = useRef({ a: null as string | null, b: null as string | null });
-  const controllers = useRef({ a: null as AbortController | null, b: null as AbortController | null });
+  const controllers = useRef({
+    a: null as AbortController | null,
+    b: null as AbortController | null,
+  });
   // Transient feedback when a drop matches nothing audio-like.
   const [dropNotice, setDropNotice] = useState<string | null>(null);
   const noticeTimer = useRef(0);
@@ -72,9 +93,10 @@ export function Analyzer() {
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
   const release = useCallback((id: SlotId) => {
-    // Stop any in-flight playback first: revoking a blob URL out from under
-    // a playing element kills seeks and can stall the element.
-    document.querySelectorAll("audio").forEach((el) => {
+    // Stop this slot's playback first: revoking a blob URL out from under
+    // a playing element kills seeks and can stall the element. The other
+    // slot keeps playing — loading B must never silence A.
+    document.querySelectorAll<HTMLAudioElement>(`audio[data-slot="${id}"]`).forEach((el) => {
       if (!el.paused) el.pause();
     });
     const url = urls.current[id];
@@ -100,13 +122,17 @@ export function Analyzer() {
         const analysis = await enqueueAnalysis(async () => {
           // A newer file may have arrived while queued on serial devices.
           if (gens.current[id] !== gen) throw new CancelledError();
-          return analyzeFile(file, (phase, amount) => {
-            if (gens.current[id] !== gen) return;
-            setSlots((s) => ({
-              ...s,
-              [id]: { status: "loading", fileName: file.name, progress: amount, phase },
-            }));
-          }, controller.signal);
+          return analyzeFile(
+            file,
+            (phase, amount) => {
+              if (gens.current[id] !== gen) return;
+              setSlots((s) => ({
+                ...s,
+                [id]: { status: "loading", fileName: file.name, progress: amount, phase },
+              }));
+            },
+            controller.signal,
+          );
         });
         if (gens.current[id] !== gen) {
           URL.revokeObjectURL(analysis.objectUrl);
@@ -148,11 +174,11 @@ export function Analyzer() {
   const onWindowDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
-      const files = [...e.dataTransfer.files].filter(
-        (f) => AUDIO_FILE_RE.test(f.type) || AUDIO_FILE_RE.test(f.name),
-      );
+      // Only drops that missed both slot cards reach here; a card drop
+      // targets its own slot (FileSlot stops propagation).
+      const files = audioFilesFrom(e.dataTransfer.files);
       if (files.length === 0) {
-        showDropNotice("That doesn't look like an audio file — try MP3, M4A, WAV, FLAC, OGG or AIFF.");
+        showDropNotice(NOT_AUDIO_NOTICE);
         return;
       }
       if (files.length >= 2) {
@@ -175,12 +201,12 @@ export function Analyzer() {
   // fallback so bit-identical drops still get the honest-tie panel.
   const identical = Boolean(
     (a?.cacheKey && b?.cacheKey && a.cacheKey === b.cacheKey) ||
-      (a &&
-        b &&
-        !a.cacheKey &&
-        !b.cacheKey &&
-        a.fileName === b.fileName &&
-        a.fileSize === b.fileSize),
+    (a &&
+      b &&
+      !a.cacheKey &&
+      !b.cacheKey &&
+      a.fileName === b.fileName &&
+      a.fileSize === b.fileSize),
   );
   const comparison: Comparison | null = useMemo(
     () => (a && b && !identical ? compareAnalyses(a, b) : null),
@@ -190,6 +216,10 @@ export function Analyzer() {
   // A/B compare: which slot the verdict button started (null = manual play).
   const [abPlaying, setAbPlaying] = useState<SlotId | null>(null);
   const abArmed = useRef(false);
+  // Non-zero while an abSwitch is between its start and the target's play
+  // event (crossfade + seek). Pauses during that window are the switch's own
+  // doing and must not end the A/B session.
+  const switchPending = useRef(0);
   const abAnalyses = useRef<{ a: Analysis; b: Analysis } | null>(null);
 
   // One global volume for both previews (persisted). Fresh sessions start at
@@ -215,6 +245,17 @@ export function Analyzer() {
       el.volume = Math.min(1, Math.max(0, volume * m));
     }
   }, [volume]);
+
+  // New files invalidate any A/B session and its loudness match. This MUST
+  // be declared before the volume effect below: effects run in declaration
+  // order, so the stale match is cleared before volumes are re-applied
+  // (otherwise a freshly loaded slot can stay attenuated by the old ratio).
+  useEffect(() => {
+    setAbPlaying(null);
+    switchPending.current = 0;
+    matchRef.current = { a: 1, b: 1 };
+    abAnalyses.current = a && b ? { a, b } : null;
+  }, [a, b]);
 
   // Keep every preview element on the global level, including freshly
   // mounted ones after a file loads.
@@ -243,12 +284,12 @@ export function Analyzer() {
   // always reach the current abSwitch without re-subscribing.
   const abSwitchRef = useRef<(target: SlotId) => void>(() => undefined);
   useEffect(() => {
-    const audios = () =>
-      [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
+    const audios = () => [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
     const onPlay = (e: Event) => {
       const id = (e as CustomEvent<SlotId>).detail;
       if (abArmed.current) {
         abArmed.current = false;
+        switchPending.current = 0;
         setAbPlaying(id);
       } else {
         setAbPlaying(null);
@@ -268,7 +309,18 @@ export function Analyzer() {
         // Media Session is best-effort.
       }
     };
+    // The A/B-active side paused (its own button, the media session, or the
+    // track ending): the session is over, so the verdict button and the A/B
+    // keys return to their idle behavior. Functional update: the other
+    // side's exclusivity/crossfade pause arrives after the new side's play
+    // already moved abPlaying on, so it never matches.
+    const onStop = (e: Event) => {
+      if (switchPending.current) return;
+      const id = (e as CustomEvent<SlotId>).detail;
+      setAbPlaying((cur) => (cur === id ? null : cur));
+    };
     window.addEventListener("spectra:now-playing", onPlay);
+    window.addEventListener(STOP_EVENT, onStop);
     try {
       if ("mediaSession" in navigator) {
         const ms = navigator.mediaSession;
@@ -293,6 +345,7 @@ export function Analyzer() {
     }
     return () => {
       window.removeEventListener("spectra:now-playing", onPlay);
+      window.removeEventListener(STOP_EVENT, onStop);
       try {
         if ("mediaSession" in navigator) {
           for (const action of ["play", "pause", "previoustrack", "nexttrack"] as const) {
@@ -305,13 +358,6 @@ export function Analyzer() {
     };
     // Subscribed once; headset handlers reach abSwitch through its ref.
   }, []);
-
-  // New files invalidate any A/B session and its loudness match.
-  useEffect(() => {
-    setAbPlaying(null);
-    matchRef.current = { a: 1, b: 1 };
-    abAnalyses.current = a && b ? { a, b } : null;
-  }, [a, b]);
 
   // Fade bookkeeping so rapid successive switches never strand audio:
   // only the newest fade on an element may pause it.
@@ -371,10 +417,14 @@ export function Analyzer() {
       const pair = abAnalyses.current;
       if (!pair) return;
       const mySwitch = ++switchSeq.current;
+      switchPending.current = mySwitch;
       const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
       const targetEl = els.find((el) => el.dataset.slot === target);
       const otherEl = els.find((el) => el.dataset.slot !== target) ?? null;
-      if (!targetEl) return;
+      if (!targetEl) {
+        switchPending.current = 0;
+        return;
+      }
       // Continue where the other preview left off. The seek is issued below
       // (once, after the crossfade starts) so decode stalls stay silent.
       const otherTime = otherEl && !otherEl.paused ? otherEl.currentTime : null;
@@ -393,14 +443,37 @@ export function Analyzer() {
       matchRef.current = target === "a" ? { a: tRatio, b: oRatio } : { a: oRatio, b: tRatio };
       const targetVolume = Math.min(1, Math.max(0, volume * tRatio));
       const otherVolume = Math.min(1, Math.max(0, volume * oRatio));
+      // The target may still be fading out from a switch this one supersedes
+      // (switching back within the fade, or within the 600 ms backstop while
+      // rAF is frozen on a locked screen). Cancel that fade now — its rAF
+      // steps and backstop both check fadeSeq — or it would pause the target
+      // right after this switch starts or adopts it, ending the session.
+      fadeSeq.current[target]++;
       targetEl.volume = targetVolume;
 
       const startTarget = () => {
         if (switchSeq.current !== mySwitch) return;
+        if (!targetEl.paused) {
+          // Already playing (manual preview, or still fading out from a
+          // switch this one supersedes): play() would fire no event, leaving
+          // the switch armed/pending forever. Adopt it directly. Its fade was
+          // cancelled above; restore the level a partial fade left behind.
+          fadeSeq.current[target]++;
+          try {
+            targetEl.volume = targetVolume;
+          } catch {
+            // Element gone: nothing to restore.
+          }
+          abArmed.current = false;
+          switchPending.current = 0;
+          setAbPlaying(target);
+          return;
+        }
         abArmed.current = true;
         targetEl.play().catch(() => {
           if (switchSeq.current !== mySwitch) return;
           abArmed.current = false;
+          switchPending.current = 0;
           setAbPlaying(null);
         });
       };
@@ -410,8 +483,7 @@ export function Analyzer() {
         // decode stall happens silently) and starts only once positioned.
         otherEl.volume = otherVolume;
         fadeOutThenPause(otherEl, otherEl.dataset.slot === "a" ? "a" : "b", otherVolume);
-        const hasDuration =
-          Number.isFinite(targetEl.duration) && targetEl.duration > 0;
+        const hasDuration = Number.isFinite(targetEl.duration) && targetEl.duration > 0;
         const seekTo = hasDuration
           ? Math.max(0, Math.min(t, Math.max(0, targetEl.duration - 0.1)))
           : null;
@@ -499,16 +571,13 @@ export function Analyzer() {
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 sm:py-10">
         <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div className="max-w-xl">
-            <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">
-              Spectra
-            </p>
+            <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">Spectra</p>
             <h1 className="mt-2 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
               Which copy kept the air?
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
-              Encoders write a bitrate in the header. That is a claim. Spectra
-              reads the audio itself — a 320 kbps file upconverted from 128 still
-              dies at 16 kHz.
+              Encoders write a bitrate in the header. That is a claim. Spectra reads the audio
+              itself — a 320 kbps file upconverted from 128 still dies at 16 kHz.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -534,10 +603,7 @@ export function Analyzer() {
         )}
 
         {identical && a && b ? (
-          <aside
-            aria-live="polite"
-            className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5"
-          >
+          <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
             <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
               <Info className="size-3.5 text-info" />
               Identical files · no comparison
@@ -546,9 +612,8 @@ export function Analyzer() {
               Both slots hold the same bytes
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
-              {a.fileName} matched itself bit-for-bit, so there is nothing to
-              declare. Drop a different copy of the song into either slot to
-              compare.
+              {a.fileName} matched itself bit-for-bit, so there is nothing to declare. Drop a
+              different copy of the song into either slot to compare.
             </p>
           </aside>
         ) : (
@@ -572,6 +637,7 @@ export function Analyzer() {
             outcome={outcomeFor("a")}
             onFile={(f) => void run("a", f)}
             onClear={() => clear("a")}
+            onRejectedDrop={() => showDropNotice(NOT_AUDIO_NOTICE)}
           />
           <FileSlot
             id="b"
@@ -579,6 +645,7 @@ export function Analyzer() {
             outcome={outcomeFor("b")}
             onFile={(f) => void run("b", f)}
             onClear={() => clear("b")}
+            onRejectedDrop={() => showDropNotice(NOT_AUDIO_NOTICE)}
           />
         </div>
 
@@ -627,9 +694,7 @@ function Verdict({
       <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
         {comparison.headline}
       </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
-        {comparison.detail}
-      </p>
+      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">{comparison.detail}</p>
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <Button
           variant="default"
@@ -641,11 +706,7 @@ function Verdict({
               : "Preview A and B back to back at matched loudness"
           }
         >
-          {abPlaying ? (
-            <Pause className="size-4" />
-          ) : (
-            <Play className="size-4 ml-0.5" />
-          )}
+          {abPlaying ? <ArrowLeftRight className="size-4" /> : <Play className="size-4 ml-0.5" />}
           {abPlaying
             ? `Previewing ${abPlaying.toUpperCase()} — switch to ${next.toUpperCase()}`
             : "A/B compare by ear"}
@@ -686,15 +747,7 @@ function Verdict({
   );
 }
 
-function CopyReport({
-  comparison,
-  a,
-  b,
-}: {
-  comparison: Comparison;
-  a: Analysis;
-  b: Analysis;
-}) {
+function CopyReport({ comparison, a, b }: { comparison: Comparison; a: Analysis; b: Analysis }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
 
@@ -839,8 +892,12 @@ function ScoreBar({
         <span className="font-mono text-xs text-faint tabular-nums">
           {score.toFixed(0)}/100 · {formatHz(cutoffHz)}
           {parts.clip < 0 && (
-            <span className="text-loss" title={`Sustained clipping docked ${parts.clip.toFixed(0)} points`}>
-              {" "}({parts.clip.toFixed(0)})
+            <span
+              className="text-loss"
+              title={`Sustained clipping docked ${parts.clip.toFixed(0)} points`}
+            >
+              {" "}
+              ({parts.clip.toFixed(0)})
             </span>
           )}
         </span>
@@ -865,15 +922,10 @@ function ScoreBar({
   );
 }
 
-function CompareTable({
-  a,
-  b,
-  winner,
-}: {
-  a: Analysis;
-  b: Analysis;
-  winner: SlotId | "tie";
-}) {
+/** Clip fractions at or below this display as "None". */
+const CLIP_SHOWN = 0.0003;
+
+function CompareTable({ a, b, winner }: { a: Analysis; b: Analysis; winner: SlotId | "tie" }) {
   const rows: { label: string; av: string; bv: string; better?: SlotId | "tie" }[] = [
     {
       label: "Winner",
@@ -907,7 +959,12 @@ function CompareTable({
       label: "High-frequency occupancy",
       av: `${Math.round(a.hfOccupancy * 100)}%`,
       bv: `${Math.round(b.hfOccupancy * 100)}%`,
-      better: Math.abs(a.hfOccupancy - b.hfOccupancy) < 0.04 ? "tie" : a.hfOccupancy > b.hfOccupancy ? "a" : "b",
+      better:
+        Math.abs(a.hfOccupancy - b.hfOccupancy) < 0.04
+          ? "tie"
+          : a.hfOccupancy > b.hfOccupancy
+            ? "a"
+            : "b",
     },
     {
       label: "Dynamic range (crest)",
@@ -922,9 +979,11 @@ function CompareTable({
     },
     {
       label: "Clipping",
-      av: a.clipFraction > 0.0003 ? `${(a.clipFraction * 100).toFixed(2)}%` : "None",
-      bv: b.clipFraction > 0.0003 ? `${(b.clipFraction * 100).toFixed(2)}%` : "None",
+      av: a.clipFraction > CLIP_SHOWN ? `${(a.clipFraction * 100).toFixed(2)}%` : "None",
+      bv: b.clipFraction > CLIP_SHOWN ? `${(b.clipFraction * 100).toFixed(2)}%` : "None",
+      // Two "None" cells are a tie, whatever the sub-threshold difference.
       better:
+        (a.clipFraction <= CLIP_SHOWN && b.clipFraction <= CLIP_SHOWN) ||
         Math.abs(a.clipFraction - b.clipFraction) < 0.0002
           ? "tie"
           : a.clipFraction < b.clipFraction
@@ -983,28 +1042,26 @@ function HowTo() {
         <li>
           <p className="font-medium text-fg">Ignore the header</p>
           <p className="mt-1">
-            File size and tagged bitrate can lie. A transcode of a 128 kbps MP3
-            still has a 16 kHz ceiling even if it now says 320.
+            File size and tagged bitrate can lie. A transcode of a 128 kbps MP3 still has a 16 kHz
+            ceiling even if it now says 320.
           </p>
         </li>
         <li>
           <p className="font-medium text-fg">Look for the black band</p>
           <p className="mt-1">
-            Brightness is energy. A hard dark strip at the top of the spectrogram
-            is the encoder's low-pass — that is the real bitrate.
+            Brightness is energy. A hard dark strip at the top of the spectrogram is the encoder's
+            low-pass — that is the real bitrate.
           </p>
         </li>
         <li>
           <p className="font-medium text-fg">Typical ceilings</p>
           <p className="mt-1">
-            ~16 kHz ≈ 128 kbps · ~19 kHz ≈ 192–256 · 20 kHz+ with a natural fade
-            into noise is lossless or transparent.
+            ~16 kHz ≈ 128 kbps · ~19 kHz ≈ 192–256 · 20 kHz+ with a natural fade into noise is
+            lossless or transparent.
           </p>
         </li>
       </ol>
-      <p className="mt-5 text-xs text-faint">
-        Files stay in this browser. Nothing is uploaded.
-      </p>
+      <p className="mt-5 text-xs text-faint">Files stay in this browser. Nothing is uploaded.</p>
     </section>
   );
 }

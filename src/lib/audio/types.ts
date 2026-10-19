@@ -1,10 +1,4 @@
-export type QualityClass =
-  | "lossless"
-  | "high"
-  | "medium"
-  | "standard"
-  | "low"
-  | "telephone";
+export type QualityClass = "lossless" | "high" | "medium" | "standard" | "low" | "telephone";
 
 export type RolloffKind = "natural" | "brickwall" | "steep";
 
@@ -70,7 +64,7 @@ export type Analysis = {
   stereoWidth: number;
   /** Fraction of frames with audible energy in 16–20 kHz. */
   hfOccupancy: number;
-  /** dB/octave from 10 kHz to cutoff. */
+  /** dB/octave of the mean spectrum from 10 to 16 kHz (or Nyquist − 100 Hz if lower). */
   hfSlope: number;
   meanDb: Float32Array;
   meanDbHzPerBin: number;

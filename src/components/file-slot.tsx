@@ -1,13 +1,7 @@
-import {
-  AudioLines,
-  Pause,
-  Play,
-  Trophy,
-  Upload,
-  X,
-} from "lucide-react";
+import { AudioLines, Pause, Play, Trophy, Upload, X } from "lucide-react";
 import * as Slider from "@radix-ui/react-slider";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
+import { audioFilesFrom, STOP_EVENT } from "@/components/audio-drop";
 import { SpectrogramCanvas } from "@/components/spectrogram-canvas";
 import { Button } from "@/components/ui/button";
 import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
@@ -37,14 +31,19 @@ type Props = {
   outcome: Outcome;
   onFile: (file: File) => void;
   onClear: () => void;
+  /** A drop onto this slot carried no audio-like file. */
+  onRejectedDrop: () => void;
 };
 
 const ACCEPT = "audio/*,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif,.mp4,.caf,.webm";
 
 /** Cross-slot exclusivity: when one preview starts, the other pauses. */
 const PLAY_EVENT = "spectra:now-playing";
+function dragHasFiles(e: DragEvent): boolean {
+  return [...(e.dataTransfer?.types ?? [])].includes("Files");
+}
 
-export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
+export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [over, setOver] = useState(false);
@@ -85,6 +84,59 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
     if (file) onFile(file);
   }
 
+  // The whole card is a drop target in every state, so a drop always lands
+  // in the slot it was aimed at (the window-level handler only sees drops
+  // that miss both cards).
+  //
+  // Highlight via an enter/leave depth counter: moving between child
+  // elements fires leave on the card too, and Safari reports
+  // relatedTarget = null on dragleave, so a containment check flickers.
+  const dragDepth = useRef(0);
+
+  // A drag that ends elsewhere (dropped on the other card / window, or
+  // cancelled) must never leave this card stuck highlighted.
+  useEffect(() => {
+    const reset = () => {
+      dragDepth.current = 0;
+      setOver(false);
+    };
+    window.addEventListener("drop", reset);
+    window.addEventListener("dragend", reset);
+    return () => {
+      window.removeEventListener("drop", reset);
+      window.removeEventListener("dragend", reset);
+    };
+  }, []);
+
+  function handleDragEnter(e: DragEvent<HTMLElement>) {
+    dragDepth.current++;
+    handleDragOver(e);
+  }
+
+  function handleDragOver(e: DragEvent<HTMLElement>) {
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+    if (!over) setOver(true);
+  }
+
+  function handleDragLeave() {
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setOver(false);
+  }
+
+  function handleDrop(e: DragEvent<HTMLElement>) {
+    dragDepth.current = 0;
+    setOver(false);
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const file = audioFilesFrom(e.dataTransfer.files)[0];
+    if (file) onFile(file);
+    else onRejectedDrop();
+  }
+
   function togglePlay() {
     const el = audioRef.current;
     if (!el) return;
@@ -108,21 +160,30 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
     window.dispatchEvent(new CustomEvent<SlotId>(PLAY_EVENT, { detail: id }));
   }
 
+  function handleStop() {
+    setPlaying(false);
+    window.dispatchEvent(new CustomEvent<SlotId>(STOP_EVENT, { detail: id }));
+  }
+
   return (
     <section
       aria-label={`${label}${outcome === "win" ? " (winner)" : outcome === "lose" ? " (runner-up)" : ""}`}
+      data-drop-over={over || undefined}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       className={cn(
-        "flex min-w-0 flex-col rounded-xl bg-bg-elevated p-4 transition-shadow sm:p-5",
+        "flex min-w-0 flex-col rounded-xl bg-bg-elevated p-4 outline-offset-2 transition-[box-shadow,outline-color] sm:p-5",
         outcome === "win" &&
           "shadow-[0_0_0_1.5px_var(--color-win),0_0_44px_-12px_var(--color-win)]",
         outcome === "lose" && "opacity-95 shadow-[0_0_0_1px_var(--color-border)]",
+        over && "outline-2 outline-dashed outline-accent",
       )}
     >
       <header className="mb-4 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className={cn("font-mono text-xs tracking-widest uppercase", trace)}>
-            {label}
-          </span>
+          <span className={cn("font-mono text-xs tracking-widest uppercase", trace)}>{label}</span>
           {outcome === "win" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-win px-2 py-0.5 text-[10px] font-semibold tracking-wide text-win-fg uppercase">
               <Trophy className="size-3" />
@@ -177,18 +238,6 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setOver(true);
-          }}
-          onDragLeave={() => setOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setOver(false);
-            pick(e.dataTransfer.files);
-          }}
           className={cn(
             "flex min-h-52 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border px-4 text-center transition-colors duration-150",
             over && "border-accent bg-bg-subtle",
@@ -197,7 +246,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
           <span className="flex size-11 items-center justify-center rounded-md bg-bg-subtle text-muted">
             <Upload className="size-5" />
           </span>
-          <span className="text-sm text-fg">Drop MP3, M4A, WAV, FLAC, OGG, or AIFF</span>
+          <span className="text-sm text-fg">Drop MP3, M4A, WAV, FLAC, OGG, AIFF, or WebM</span>
           <span className="text-xs text-muted">or click to browse</span>
         </button>
       )}
@@ -258,19 +307,15 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
               aria-pressed={playing}
               className={cn("shrink-0", playing && "ring-1 ring-win/60")}
             >
-              {playing ? (
-                <Pause className="size-4" />
-              ) : (
-                <Play className="size-4 ml-0.5" />
-              )}
+              {playing ? <Pause className="size-4" /> : <Play className="size-4 ml-0.5" />}
             </Button>
             <audio
               ref={audioRef}
               src={state.analysis.objectUrl}
               data-slot={id}
               preload="auto"
-              onEnded={() => setPlaying(false)}
-              onPause={() => setPlaying(false)}
+              onEnded={handleStop}
+              onPause={handleStop}
               onPlay={handlePlay}
               onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
               onLoadedMetadata={(e) => {
@@ -287,9 +332,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
           <SeekBar
             label={label}
             position={position}
-            duration={
-              mediaDuration ?? state.analysis.durationSec
-            }
+            duration={mediaDuration ?? state.analysis.durationSec}
             onSeek={(t) => {
               const el = audioRef.current;
               if (el && Number.isFinite(t)) {
@@ -311,16 +354,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear }: Props) {
           <SpectrogramCanvas analysis={state.analysis} />
 
           <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-            <Stat
-              label="Spectral ceiling"
-              value={formatHz(state.analysis.cutoffHz)}
-              emphasize
-            />
+            <Stat label="Spectral ceiling" value={formatHz(state.analysis.cutoffHz)} emphasize />
             <Stat label="True class" value={QUALITY_LABEL[state.analysis.qualityClass]} />
-            <Stat
-              label="Container bitrate"
-              value={formatKbps(state.analysis.containerKbps)}
-            />
+            <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
             <Stat
               label="Header bitrate"
               value={
@@ -408,15 +444,7 @@ function SeekBar({
   );
 }
 
-function Stat({
-  label,
-  value,
-  emphasize,
-}: {
-  label: string;
-  value: string;
-  emphasize?: boolean;
-}) {
+function Stat({ label, value, emphasize }: { label: string; value: string; emphasize?: boolean }) {
   return (
     <div>
       <dt className="text-[11px] tracking-wide text-faint uppercase">{label}</dt>

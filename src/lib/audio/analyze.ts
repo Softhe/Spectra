@@ -146,7 +146,8 @@ async function sanitizeNonFinite(buffer: AudioBuffer, signal?: AbortSignal): Pro
   }
 }
 
-function stereoWidth(buffer: AudioBuffer): number {  if (buffer.numberOfChannels < 2) return 0;
+function stereoWidth(buffer: AudioBuffer): number {
+  if (buffer.numberOfChannels < 2) return 0;
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
   const n = Math.min(L.length, R.length);
@@ -212,9 +213,7 @@ function rankWindows(
     }
     return n ? sum / n : 0;
   };
-  const candidates = [0.08, 0.24, 0.4, 0.56, 0.72, 0.86].map((f) =>
-    clamp(Math.floor(f * length)),
-  );
+  const candidates = [0.08, 0.24, 0.4, 0.56, 0.72, 0.86].map((f) => clamp(Math.floor(f * length)));
   candidates.sort((x, y) => windowScore(y.start) - windowScore(x.start));
   const picked = candidates.slice(0, keep);
   picked.sort((x, y) => x.start - y.start);
@@ -456,11 +455,36 @@ function occupancyCurve(
   return occ;
 }
 
+export type DspOptions = {
+  /**
+   * False when the decode rate was NOT confirmed by the container (no sniffed
+   * rate, or the hinted rate failed and a fallback rate was used — then pass
+   * it as `sourceRate`). A 44.1 kHz source decoded at 48 kHz keeps its own
+   * band edge near 22 kHz, far below the new Nyquist — that edge must not
+   * read as an encoder low-pass. Omitted/true keeps the calibrated behavior
+   * exactly.
+   */
+  rateConfirmed?: boolean;
+  /**
+   * Container-reported sample rate when it is known but the decode had to
+   * run at another rate (native decode failed). Pins the only plausible
+   * source band edge to sourceRate / 2. Ignored unless rateConfirmed is false.
+   */
+  sourceRate?: number | null;
+};
+
+// Widest 10→90% transition still read as a source band edge (occupancy /
+// mean-spectrum curves). Hard cuts measure ~200 Hz (the smoothing floor),
+// windowed-sinc 44.1→48 kHz resamplers 260–440 Hz; wider is a fade.
+const OCC_EDGE_MAX_WIDTH = 500;
+const MEAN_EDGE_MAX_WIDTH = 600;
+
 export async function detectCutoff(
   frames: Float32Array[],
   sampleRate: number,
   meanDb: Float32Array,
   frameRmsDb?: Float32Array | null,
+  opts?: DspOptions,
 ): Promise<{
   cutoffHz: number;
   rolloff: RolloffKind;
@@ -476,6 +500,12 @@ export async function detectCutoff(
    * air) rather than an encoder low-pass — class must cap at "high".
    */
   sourceLimited: boolean;
+  /**
+   * Nyquist the ceiling is judged against: the decode Nyquist, or the
+   * inferred original one when an unconfirmed-rate decode shows the source's
+   * band edge (22.05 / 24 kHz) below it.
+   */
+  sourceNyquistHz: number;
 }> {
   const nBins = frames[0]?.length ?? 0;
   const binHz = sampleRate / FFT_SIZE;
@@ -493,14 +523,95 @@ export async function detectCutoff(
   }
   let cutoffHz = Math.min(nyquist, cutoffBin * binHz);
 
+  // Source band edge — only when the decode rate is a guess. A 44.1 kHz
+  // source decoded at 48 kHz carries its own band edge near 22.05 kHz, far
+  // below the decode Nyquist; that edge must not read as an encoder
+  // low-pass. With a known container rate whose native decode failed, the
+  // only candidate is that rate's Nyquist; with no container rate, the
+  // common 44.1 / 48 kHz originals are tried.
+  const sourceEdges =
+    opts?.rateConfirmed === false
+      ? (opts.sourceRate ? [opts.sourceRate / 2] : [22050, 24000]).filter((e) => e < nyquist - 400)
+      : [];
+  let sourceEdge: number | null = null;
+  // Lightly smoothed occupancy for the resumed-content check.
+  const occFine = sourceEdges.length > 0 ? smooth(occ, 1) : occ;
+  /**
+   * Falling transition of `curve` between bins `from` (before) and `to`
+   * (after): position of the halfway crossing and the 10→90% width, in Hz.
+   * The scan windows only bracket a cliff to within ~their span; this pins it.
+   */
+  const transition = (curve: Float32Array, from: number, to: number) => {
+    const hi = curve[from]!;
+    const d = hi - curve[to]!;
+    let k10 = -1;
+    let k50 = -1;
+    let k90 = -1;
+    for (let k = from; k <= to; k++) {
+      const v = curve[k]!;
+      if (k10 < 0 && v < hi - 0.1 * d) k10 = k;
+      if (k50 < 0 && v < hi - 0.5 * d) k50 = k;
+      if (k90 < 0 && v < hi - 0.9 * d) k90 = k;
+    }
+    if (k90 < 0) k90 = to;
+    if (k50 < 0) k50 = to;
+    if (k10 < 0) k10 = from;
+    return { posHz: k50 * binHz, widthHz: (k90 - k10) * binHz };
+  };
+  /**
+   * The candidate source Nyquist a falling transition at `posHz` is, or null.
+   *
+   * Window on the precise halfway crossing: [edge − 700, edge + max(40 Hz,
+   * 1.5 bins)]. Above: a cliff past the edge proves content the source can't
+   * have had (a 22.1 kHz cut is not a 44.1 kHz source), so the tolerance is
+   * just bin quantization. Below: measured on full-band 44.1 kHz noise put
+   * through Kaiser windowed-sinc 44.1→48 kHz resamplers, the crossing lands
+   * at 21.49–22.08 kHz for cutoffs 0.95–0.99·Nyquist (32–128 taps/side);
+   * softer resamplers (≤ 0.94·Nyquist, e.g. 0.9 with 16 taps) land at
+   * 21.0–21.2 kHz and read as a low-pass regardless.
+   *
+   * RESIDUAL AMBIGUITY: a genuine encoder low-pass whose cliff crosses in
+   * [edge − 700, edge] (≈ 21.35–22.09 kHz for 44.1 kHz) is indistinguishable
+   * from that band edge — neither position nor steepness separates them —
+   * and is read as the source's. Common encoders top out near 20–20.5 kHz,
+   * so this band is nearly empty in practice, and it only applies to
+   * unconfirmed-rate decodes. A soft fade (wider than `maxWidthHz`)
+   * or content resuming above the transition is never a band edge.
+   */
+  const EDGE_BELOW = 700;
+  const EDGE_ABOVE = Math.max(40, 1.5 * binHz);
+  const edgeFor = (posHz: number, widthHz: number, maxWidthHz: number): number | null => {
+    const edge = sourceEdges.find((e) => posHz >= e - EDGE_BELOW && posHz <= e + EDGE_ABOVE);
+    if (edge === undefined || widthHz > maxWidthHz) return null;
+    // Content resuming beyond the transition is not a band edge either.
+    for (let k = Math.max(binAt(edge) + 3, binAt(posHz + widthHz)); k < nBins; k++) {
+      if (occFine[k]! >= OCC_ON) return null;
+    }
+    return edge;
+  };
+
   const span = Math.max(2, Math.round(600 / binHz));
-  let steepest = 0;
-  let dropBin = binAt(8000);
-  for (let k = binAt(7000); k < nBins - span; k++) {
-    const drop = sm[k]! - sm[k + span]!;
-    if (drop > steepest) {
-      steepest = drop;
-      dropBin = k;
+  const scanDrop = (limit: number) => {
+    let steepest = 0;
+    let dropBin = binAt(8000);
+    for (let k = binAt(7000); k + span < limit; k++) {
+      const drop = sm[k]! - sm[k + span]!;
+      if (drop > steepest) {
+        steepest = drop;
+        dropBin = k;
+      }
+    }
+    return { steepest, dropBin };
+  };
+  let { steepest, dropBin } = scanDrop(nBins);
+  if (sourceEdges.length > 0 && steepest > 0.32 && dropBin * binHz < nyquist - 400) {
+    const t = transition(sm, dropBin, dropBin + span);
+    const edge = edgeFor(t.posHz, t.widthHz, OCC_EDGE_MAX_WIDTH);
+    if (edge !== null) {
+      // The steepest drop is the source's band edge: judge only what lies
+      // below the transition, as a native-rate decode would have seen it.
+      sourceEdge = edge;
+      ({ steepest, dropBin } = scanDrop(binAt(t.posHz - t.widthHz - 100)));
     }
   }
 
@@ -545,6 +656,16 @@ export async function detectCutoff(
         if (meanSm[j]! > rec) rec = meanSm[j]!;
       }
       if (rec > top - 20) continue; // content gap, not a cut
+      if (sourceEdges.length > 0) {
+        const t = transition(meanSm, k, k + cliffSpan);
+        const edge = edgeFor(t.posHz, t.widthHz, MEAN_EDGE_MAX_WIDTH);
+        if (edge !== null) {
+          // The source's band edge, not an encoder cut — and nothing above
+          // it belongs to the source, so stop scanning here.
+          sourceEdge ??= edge;
+          break;
+        }
+      }
       rolloff = "brickwall";
       brickwallHz = (k + cliffSpan / 2) * binHz;
       cutoffHz = brickwallHz;
@@ -552,7 +673,15 @@ export async function detectCutoff(
     }
   }
 
-  cutoffHz = Math.min(cutoffHz, nyquist);
+  // A brickwall above where the edge was inferred proves content past it:
+  // the inference was wrong, so judge against the decode Nyquist again.
+  if (sourceEdge !== null && brickwallHz !== null && brickwallHz > sourceEdge - EDGE_BELOW) {
+    sourceEdge = null;
+  }
+  // Only a cliff establishes a source edge — a natural fade near 22 kHz is
+  // the music running out and is judged against the decode Nyquist.
+  const sourceNyquistHz = sourceEdge ?? nyquist;
+  cutoffHz = Math.min(cutoffHz, sourceNyquistHz);
 
   const lo = binAt(16000);
   const hi = binAt(Math.min(20000, nyquist - 50));
@@ -597,9 +726,19 @@ export async function detectCutoff(
   // No cliff found (cutoff rode to within a bin or two of Nyquist) yet no
   // real air: the ceiling is the music, not an encoder. Callers cap class.
   const sourceLimited =
-    rolloff === "natural" && cutoffHz >= nyquist * 0.985 && hfOccupancy < 0.35;
+    rolloff === "natural" && cutoffHz >= sourceNyquistHz * 0.985 && hfOccupancy < 0.35;
 
-  return { cutoffHz, rolloff, brickwallHz, hfSlope, hfOccupancy, hfFlatness, bbFlatness, sourceLimited };
+  return {
+    cutoffHz,
+    rolloff,
+    brickwallHz,
+    hfSlope,
+    hfOccupancy,
+    hfFlatness,
+    bbFlatness,
+    sourceLimited,
+    sourceNyquistHz,
+  };
 }
 
 export function classifyQuality(
@@ -620,23 +759,18 @@ export function classifyQuality(
   // ceiling reflects the source, so "high" is the honest ceiling.
   if (sourceLimited) return "high";
 
-  // Absolute floors are calibrated at 44.1 kHz; scale for higher rates so
-  // 48/96 kHz lossless isn't punished for content living under 22 kHz.
   // The lossless bar caps at 24 kHz — content above that is mic/air, and
   // demanding cutoff ≥ nyquist·0.9 would make 96 kHz lossless unreachable.
   const ref = Math.min(nyquist, 24000);
-  const scale = Math.max(1, ref / 22050);
-  if (
-    cutoffHz >= Math.max(20000, ref * 0.9) &&
-    rolloff === "natural" &&
-    hfOccupancy >= 0.3
-  ) {
+  if (cutoffHz >= Math.max(20000, ref * 0.9) && rolloff === "natural" && hfOccupancy >= 0.3) {
     return "lossless";
   }
-  if (cutoffHz >= 18500 * scale) return "high";
-  if (cutoffHz >= 17000 * scale) return "medium";
-  if (cutoffHz >= 14000 * scale) return "standard";
-  if (cutoffHz >= 10000 * scale) return "low";
+  // Encoder low-passes are absolute frequencies (LAME 320k cuts ~20 kHz at
+  // any rate), so the lossy ladder must not scale with the sample rate.
+  if (cutoffHz >= 18500) return "high";
+  if (cutoffHz >= 17000) return "medium";
+  if (cutoffHz >= 14000) return "standard";
+  if (cutoffHz >= 10000) return "low";
   return "telephone";
 }
 
@@ -661,11 +795,9 @@ export function scoreOf(input: {
     clarity: 12 * (1 - Math.min(1, input.bbFlatness * 3)),
     // Sustained clipping docks; isolated lossy-decoder overshoots don't count
     // (they never form runs — see mixDownWithStats).
-    clip:
-      input.clipFraction > 0.002 ? -14 : input.clipFraction > 0.0003 ? -6 : 0,
+    clip: input.clipFraction > 0.002 ? -14 : input.clipFraction > 0.0003 ? -6 : 0,
   };
-  let total =
-    parts.ceiling + parts.rolloff + parts.air + parts.clarity + parts.clip;
+  let total = parts.ceiling + parts.rolloff + parts.air + parts.clarity + parts.clip;
   // Starved full-band mush: cap hard regardless of ceiling.
   if (input.bbFlatness > 0.45) total = Math.min(total, 35);
   return { total: Math.max(0, Math.min(100, total)), parts };
@@ -708,10 +840,16 @@ function resampleFramesToDisplay(
 
 /**
  * Decode failures name the likely cause: Safari (and older Edge) can't
- * decode Vorbis/Opus at all, so those files get a targeted message instead
- * of the generic format list.
+ * decode Vorbis/Opus at all, and only Safari decodes Apple Lossless (ALAC),
+ * so those files get a targeted message instead of the generic format list.
  */
-function decodeErrorMessage(fileName: string, codec: string): string {
+export function decodeErrorMessage(fileName: string, codec: string): string {
+  if (/^alac$/i.test(codec)) {
+    return (
+      `Could not decode “${fileName}”. This browser can't decode Apple Lossless (ALAC) — ` +
+      `open this page in Safari, or convert the song to FLAC or WAV.`
+    );
+  }
   if (/vorbis|opus/i.test(codec)) {
     return (
       `Could not decode “${fileName}”. Safari can't play ${codec} files — ` +
@@ -731,9 +869,7 @@ function decodeBuffer(
   bytes: ArrayBuffer,
 ): Promise<AudioBuffer> {
   try {
-    const maybe = (ctx.decodeAudioData as unknown as (
-      buf: ArrayBuffer,
-    ) => unknown)(bytes);
+    const maybe = (ctx.decodeAudioData as unknown as (buf: ArrayBuffer) => unknown)(bytes);
     if (maybe && typeof (maybe as Promise<AudioBuffer>).then === "function") {
       return maybe as Promise<AudioBuffer>;
     }
@@ -742,11 +878,13 @@ function decodeBuffer(
   }
   return new Promise<AudioBuffer>((resolve, reject) => {
     try {
-      (ctx.decodeAudioData as unknown as (
-        buf: ArrayBuffer,
-        ok: (b: AudioBuffer) => void,
-        err: (e: unknown) => void,
-      ) => void).call(ctx, bytes.slice(0), resolve, reject);
+      (
+        ctx.decodeAudioData as unknown as (
+          buf: ArrayBuffer,
+          ok: (b: AudioBuffer) => void,
+          err: (e: unknown) => void,
+        ) => void
+      ).call(ctx, bytes.slice(0), resolve, reject);
     } catch (err) {
       reject(err);
     }
@@ -785,8 +923,7 @@ async function decodeNative(
   try {
     const AC =
       window.AudioContext ??
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) throw lastErr ?? new Error("No AudioContext available.");
     const ctx = new AC();
     try {
@@ -841,6 +978,7 @@ export async function runDsp(
   onProgress?: (phase: string, amount: number) => void,
   spans?: DspSpans,
   signal?: AbortSignal,
+  options?: DspOptions,
 ): Promise<DspResult> {
   throwIfAborted(signal);
   const regions = spans?.regions ?? pickRegions(mono, sampleRate);
@@ -875,17 +1013,12 @@ export async function runDsp(
   const frameRms = Float32Array.from(allRmsDb);
   const keep = loudFrameMask(frameRms, allFrames.length);
   const meanDb = await meanSpectrum(allFrames, nBins, keep, signal);
-  const cutoff = await detectCutoff(
-    allFrames,
-    sampleRate,
-    meanDb,
-    frameRms,
-  );
+  const cutoff = await detectCutoff(allFrames, sampleRate, meanDb, frameRms, options);
   const hfOcc = cutoff.hfOccupancy;
   const nyquistHz = sampleRate / 2;
   const qualityClass = classifyQuality(
     cutoff.cutoffHz,
-    nyquistHz,
+    cutoff.sourceNyquistHz,
     cutoff.rolloff,
     hfOcc,
     { bbFlatness: cutoff.bbFlatness, sourceLimited: cutoff.sourceLimited },
@@ -980,6 +1113,14 @@ export async function analyzeFile(
   } catch {
     throw new Error(decodeErrorMessage(file.name, container.codec));
   }
+  // Only a decode at the container's own rate is native; anything else is a
+  // fallback guess and may have resampled the source. When the container
+  // did report a rate (its native decode just failed), that rate still pins
+  // the source's band edge.
+  const rateConfirmed = container.sampleRate !== null && audio.sampleRate === container.sampleRate;
+  const dspOptions: DspOptions = rateConfirmed
+    ? { rateConfirmed }
+    : { rateConfirmed, sourceRate: container.sampleRate };
 
   if (audio.length < 256 || audio.duration < 0.15) {
     throw new Error("That file is too short to analyze.");
@@ -1062,6 +1203,7 @@ export async function analyzeFile(
     onProgress,
     spans,
     signal,
+    dspOptions,
   );
 
   const containerKbps = audio.duration > 0 ? (file.size * 8) / audio.duration / 1000 : 0;
@@ -1167,8 +1309,21 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
     };
   }
 
+  // "More air kept" is only true when the winner's ceiling is meaningfully
+  // higher (same 500 Hz bar as the tie text). A score-driven win over an
+  // equal or higher ceiling must say why it won instead — and still name
+  // both ceilings truthfully.
+  const airLead = better.cutoffHz - worse.cutoffHz;
+  const bandwidth =
+    airLead >= 500
+      ? `${fmtK(better.cutoffHz)} of real bandwidth versus ${fmtK(worse.cutoffHz)} — ${fmtK(airLead)} more air kept.`
+      : `File ${betterSlot} reaches ${fmtK(better.cutoffHz)} and File ${worseSlot} ${fmtK(worse.cutoffHz)}, so bandwidth alone doesn't decide this — ` +
+        (better.rolloff === "natural" && worse.rolloff !== "natural"
+          ? `File ${betterSlot} ends in a clean natural rolloff where File ${worseSlot} hits ${worse.rolloff === "brickwall" ? "a brickwall low-pass" : "a steep rolloff"}, and it scores higher overall (${better.score.toFixed(0)} vs ${worse.score.toFixed(0)}).`
+          : `File ${betterSlot} scores clearly higher overall (${better.score.toFixed(0)} vs ${worse.score.toFixed(0)}).`);
+
   const wall =
-    worse.rolloff === "brickwall"
+    worse.rolloff === "brickwall" && !(airLead < 500 && better.rolloff === "natural")
       ? ` File ${worseSlot} is brickwalled — a hard encoder low-pass, not a quiet mix.`
       : "";
 
@@ -1188,15 +1343,13 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
       ? ` The header says ${claimed} kbps, but the spectrum behaves like a much lower-rate encode.`
       : "";
 
-  const lengthNote = sameLength
-    ? ""
-    : " Lengths differ, so double-check these are the same song.";
+  const lengthNote = sameLength ? "" : " Lengths differ, so double-check these are the same song.";
 
   return {
     winner,
     confidence,
     headline: `Winner: File ${betterSlot} — the higher-quality copy`,
-    detail: `${fmtK(better.cutoffHz)} of real bandwidth versus ${fmtK(worse.cutoffHz)} — ${fmtK(Math.abs(cutoffDeltaHz))} more air kept.${wall}${mismatch}${lengthNote}`,
+    detail: `${bandwidth}${wall}${mismatch}${lengthNote}`,
     cutoffDeltaHz,
     sameLength,
   };

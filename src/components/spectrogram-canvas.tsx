@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { buildLut, DB_MAX, DB_MIN } from "@/lib/audio/colormap";
 import { formatHz } from "@/lib/audio/format";
 import type { Analysis } from "@/lib/audio/types";
@@ -155,8 +163,18 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
   // render time. Pointer probes land on the same representation.
   const hoverTop = hover == null ? null : (1 - hover / analysis.spectrogram.maxHz) * 100;
 
+  // Axis positions are percent-from-top of the 0..maxHz column. The ceiling
+  // label is clamped to 6–94% so it never clips at the edges; a tick whose
+  // rendered position sits within one label height of the label's (clamped)
+  // position would overlap it, so it is hidden. 8% ≈ a 10px label's line box
+  // on the shortest (h-48, 192px) column.
+  const pctOf = (hz: number) => (1 - hz / analysis.spectrogram.maxHz) * 100;
+  const ceilingPct = Math.min(94, Math.max(6, pctOf(analysis.cutoffHz)));
+  const LABEL_CLEARANCE_PCT = 8;
   const ticks = [0, 5, 10, 15, 20].filter(
-    (k) => k * 1000 <= analysis.spectrogram.maxHz + 50,
+    (k) =>
+      k * 1000 <= analysis.spectrogram.maxHz + 50 &&
+      Math.abs(pctOf(k * 1000) - ceilingPct) >= LABEL_CLEARANCE_PCT,
   );
 
   return (
@@ -194,43 +212,30 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
           <span>{analysis.spectrogram.excerptStartSec.toFixed(1)}s</span>
           <span>excerpt</span>
           <span>
-            {(
-              analysis.spectrogram.excerptStartSec + analysis.spectrogram.durationSec
-            ).toFixed(1)}
-            s
+            {(analysis.spectrogram.excerptStartSec + analysis.spectrogram.durationSec).toFixed(1)}s
           </span>
         </div>
       </div>
       <div className="relative w-10 shrink-0 sm:w-12">
         <div className="relative h-48 sm:h-64">
-          {ticks
-            .filter((k) => Math.abs(k * 1000 - analysis.cutoffHz) > 1800)
-            .map((k) => {
-            const hz = k * 1000;
-            const t = hz / analysis.spectrogram.maxHz;
-            return (
-              <span
-                key={k}
-                className="absolute right-0 -translate-y-1/2 font-mono text-[10px] text-faint"
-                style={{ top: `${(1 - t) * 100}%` }}
-              >
-                {k === 0 ? "0" : `${k}k`}
-              </span>
-            );
-          })}
+          {ticks.map((k) => (
+            <span
+              key={k}
+              className="absolute right-0 -translate-y-1/2 font-mono text-[10px] text-faint"
+              style={{ top: `${pctOf(k * 1000)}%` }}
+            >
+              {k === 0 ? "0" : `${k}k`}
+            </span>
+          ))}
           <span
             className="absolute right-0 -translate-y-1/2 font-mono text-[10px] text-fg"
-            style={{
-              top: `${Math.min(94, Math.max(6, (1 - analysis.cutoffHz / analysis.spectrogram.maxHz) * 100))}%`,
-            }}
+            style={{ top: `${ceilingPct}%` }}
           >
             {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
           </span>
         </div>
         {hover != null && (
-          <div className="mt-1 font-mono text-[11px] text-fg tabular-nums">
-            {formatHz(hover)}
-          </div>
+          <div className="mt-1 font-mono text-[11px] text-fg tabular-nums">{formatHz(hover)}</div>
         )}
       </div>
     </div>

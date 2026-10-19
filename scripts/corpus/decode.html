@@ -1,18 +1,33 @@
 <!doctype html><html><head><meta charset="utf-8"><title>decode</title></head><body><script>
-window.decodeOne = async (path) => {
+// Decodes at an explicit rate (the app's decodeNative uses
+// OfflineAudioContext(2, 128, sniffedRate)); a realtime AudioContext would
+// silently resample everything to the device rate, so 48 kHz items would
+// never be graded at 48 kHz. The mono mix is kept in-page and pulled out in
+// base64 chunks: Array.from() JSON transfer does not scale to the >15 min
+// Lite item (~42 M samples).
+let last = null;
+window.decodeOne = async (path, rate) => {
+  last = null;
   const bytes = new Uint8Array(await (await fetch(path)).arrayBuffer());
   const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const ctx = new AudioContext();
+  const ctx = new OfflineAudioContext(2, 128, rate || 44100);
   try {
     const audio = await ctx.decodeAudioData(ab);
     const l = audio.getChannelData(0), r = audio.numberOfChannels > 1 ? audio.getChannelData(1) : l;
     const mono = new Float32Array(l.length);
     for (let i = 0; i < mono.length; i++) mono[i] = (l[i] + r[i]) / 2;
-    return { ok: true, sr: audio.sampleRate, ch: audio.numberOfChannels, mono: Array.from(mono) };
+    last = mono;
+    return { ok: true, sr: audio.sampleRate, ch: audio.numberOfChannels, samples: mono.length };
   } catch (e) {
     return { ok: false, error: String(e && e.message || e) };
-  } finally {
-    await ctx.close();
   }
+};
+// Returns float32 little-endian bytes [start, start+count) of the last decode, base64.
+window.chunkB64 = (start, count) => {
+  const sub = last.subarray(start, Math.min(last.length, start + count));
+  const u8 = new Uint8Array(sub.buffer, sub.byteOffset, sub.byteLength);
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
 };
 </script></body></html>

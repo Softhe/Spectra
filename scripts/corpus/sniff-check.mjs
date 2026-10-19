@@ -1,7 +1,7 @@
 // Byte-fixture unit checks for sniffContainer. Run from the repo root:
 //   node --experimental-strip-types --no-warnings --loader ./scripts/corpus/ts-resolve.mjs ./scripts/corpus/sniff-check.mjs
-// The last case needs one genuine .m4a (see scripts/corpus/README section in
-// the top-level README); it is skipped gracefully when absent.
+// Cases 8+ need genuine encodes in $CORPUS_DIR/enc (scripts/corpus/README.md,
+// step 2b); each is skipped gracefully when its file is absent.
 import { sniffContainer } from "../../src/lib/audio/sniff.ts";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -11,7 +11,7 @@ let fails = 0;
 const eq = (name, got, want) => {
   const ok = JSON.stringify(got) === JSON.stringify(want);
   if (!ok) fails++;
-  console.log(ok ? "ok  " : "FAIL", name, ok ? "" : `got=${JSON.stringify(got)} want=${JSON.stringify(want)}`);
+  console.log(ok ? "PASS" : "FAIL", name, ok ? "" : `got=${JSON.stringify(got)} want=${JSON.stringify(want)}`);
 };
 const u8 = (arr) => new Uint8Array(arr).buffer;
 
@@ -84,20 +84,85 @@ const u8 = (arr) => new Uint8Array(arr).buffer;
   eq("wav", [r.codec, r.sampleRate, r.channels, r.claimedKbps], ["PCM", 48000, 2, 1536]);
 }
 
+// ---- Genuine FFmpeg encodes from $CORPUS_DIR/enc (encode.sh) ----
+// Each case is skipped gracefully when the file is absent.
+const SNIFF_WINDOW = 512 * 1024; // sniffContainer's head window
+const encPath = (f) => [`${CORPUS_DIR}/enc/${f}`, `${CORPUS_DIR}/${f}`].find(existsSync);
+const loadEnc = (f) => {
+  const path = encPath(f);
+  if (!path) return null;
+  const b = readFileSync(path);
+  return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+};
+/** Top-level MP4 boxes -> { type: offset } (first occurrence). */
+const topBoxes = (ab) => {
+  const v = new DataView(ab), out = {};
+  for (let o = 0; o + 8 <= ab.byteLength;) {
+    let n = v.getUint32(o);
+    const t = String.fromCharCode(v.getUint8(o + 4), v.getUint8(o + 5), v.getUint8(o + 6), v.getUint8(o + 7));
+    if (n === 1) n = Number(v.getBigUint64(o + 8));
+    if (!(t in out)) out[t] = o;
+    if (n < 8) break;
+    o += n;
+  }
+  return out;
+};
+const withEnc = (label, f, fn) => {
+  const ab = loadEnc(f);
+  if (!ab) { console.log(`skip ${label} (${f} absent; build the corpus first, see scripts/corpus/README.md)`); return; }
+  fn(ab);
+};
+// Fixture precondition: the file really has moov after mdat, past the
+// sniff window (FFmpeg default without +faststart). Without this the case
+// would silently test the easy layout.
+const moovAtEnd = (label, ab) => {
+  const bx = topBoxes(ab);
+  eq(`${label}-precondition-moov-after-mdat-beyond-512k`,
+    bx.moov > bx.mdat && bx.moov >= SNIFF_WINDOW, true);
+};
+
 // 8. Genuine FFmpeg M4A: timescale (not duration) as sample rate (regression
 // for the mdhd+20 → duration bug, which resampled every short M4A).
-{
-  const m4a = `${CORPUS_DIR}/bright-aac-128.m4a`;
-  if (!existsSync(m4a)) {
-    console.log("skip real-m4a (build the corpus first; see README)");
-  } else {
-    const b = readFileSync(m4a);
-    const ab = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-    const r = sniffContainer(ab, "bright-aac-128.m4a", "audio/mp4");
-    eq("real-m4a", [r.codec, r.sampleRate, r.channels, r.vbr], ["AAC", 44100, 2, true]);
-    eq("real-m4a-claimed-near128", r.claimedKbps >= 100 && r.claimedKbps <= 200, true);
-  }
+// (Previously looked in $CORPUS_DIR/ instead of $CORPUS_DIR/enc/, so it
+// always skipped; encPath now checks enc/ first.)
+withEnc("real-m4a", "bright-aac-128.m4a", (ab) => {
+  const r = sniffContainer(ab, "bright-aac-128.m4a", "audio/mp4");
+  eq("real-m4a", [r.codec, r.sampleRate, r.channels, r.vbr], ["AAC", 44100, 2, true]);
+  eq("real-m4a-claimed-near128", r.claimedKbps >= 100 && r.claimedKbps <= 200, true);
+});
+// 9. 48 kHz AAC (short, moov at end but inside the window): real rate.
+withEnc("real-m4a-48k", "bright-48k-aac-128.m4a", (ab) => {
+  const r = sniffContainer(ab, "bright-48k-aac-128.m4a", "audio/mp4");
+  eq("real-m4a-48k", [r.codec, r.sampleRate, r.channels], ["AAC", 48000, 2]);
+});
+// 10. Long AAC-256, moov at end beyond 512 KB: sample rate must still be sniffed.
+withEnc("long-aac-moov-end", "bright-long-aac-256.m4a", (ab) => {
+  moovAtEnd("long-aac-moov-end", ab);
+  const r = sniffContainer(ab, "bright-long-aac-256.m4a", "audio/mp4");
+  eq("long-aac-moov-end", [r.codec, r.sampleRate, r.channels], ["AAC", 44100, 2]);
+});
+// 11. ALAC, moov at end beyond 512 KB: codec ALAC + real rate (44.1k and 48k,
+// so a 44100 default can't pass both) + the cookie's real bit depth (16).
+for (const [f, sr] of [["bright-long-alac.m4a", 44100], ["bright-48k-alac.m4a", 48000]]) {
+  const label = f.replace(/\.m4a$/, "");
+  withEnc(label, f, (ab) => {
+    moovAtEnd(label, ab);
+    const r = sniffContainer(ab, f, "audio/mp4");
+    eq(label, [r.codec, r.sampleRate, r.channels], ["ALAC", sr, 2]);
+    eq(`${label}-bitdepth`, r.bitDepth, 16);
+  });
 }
+// 12. 48 kHz Opus (Ogg): always reports 48000 (Opus's fixed decode rate).
+withEnc("real-opus-48k", "bright-48k-opus-128.ogg", (ab) => {
+  const r = sniffContainer(ab, "bright-48k-opus-128.ogg", "audio/ogg");
+  eq("real-opus-48k", [r.codec, r.sampleRate, r.channels], ["Opus", 48000, 2]);
+});
+// 13. Optional Lite leg (LITE=1): 16 min AAC, moov ~30 MB in.
+withEnc("lite-aac-moov-end", "bright-lite-aac-256.m4a", (ab) => {
+  moovAtEnd("lite-aac-moov-end", ab);
+  const r = sniffContainer(ab, "bright-lite-aac-256.m4a", "audio/mp4");
+  eq("lite-aac-moov-end", [r.codec, r.sampleRate, r.channels], ["AAC", 44100, 2]);
+});
 
 console.log(fails === 0 ? "ALL PASS" : `${fails} FAILURES`);
 process.exit(fails === 0 ? 0 : 1);
