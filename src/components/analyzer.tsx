@@ -276,10 +276,9 @@ export function Analyzer() {
   // The same event also feeds lock-screen / headset controls (Media Session).
   const analysesRef = useRef<{ a: Analysis | null; b: Analysis | null }>({ a: null, b: null });
   analysesRef.current = { a, b };
-  const abPlayingRef = useRef<SlotId | null>(null);
-  useEffect(() => {
-    abPlayingRef.current = abPlaying;
-  }, [abPlaying]);
+  // Last slot that actually played, A/B or manual. Kept apart from abPlaying,
+  // which clears on pause — headset play must resume the copy that paused.
+  const lastPlayedRef = useRef<SlotId | null>(null);
   // Latest-switch ref: lets the Media Session handlers (subscribed once)
   // always reach the current abSwitch without re-subscribing.
   const abSwitchRef = useRef<(target: SlotId) => void>(() => undefined);
@@ -287,6 +286,7 @@ export function Analyzer() {
     const audios = () => [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
     const onPlay = (e: Event) => {
       const id = (e as CustomEvent<SlotId>).detail;
+      lastPlayedRef.current = id;
       if (abArmed.current) {
         abArmed.current = false;
         switchPending.current = 0;
@@ -326,9 +326,9 @@ export function Analyzer() {
         const ms = navigator.mediaSession;
         ms.setActionHandler("play", () => {
           const els = audios();
-          // Resume the most recently active preview, else the firstPaused.
+          // Resume the most recently played preview, else the first paused.
           const target =
-            els.find((el) => el.dataset.slot === abPlayingRef.current) ??
+            els.find((el) => el.dataset.slot === lastPlayedRef.current) ??
             els.find((el) => el.paused) ??
             els[0];
           if (target) void target.play().catch(() => undefined);
