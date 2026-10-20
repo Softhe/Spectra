@@ -384,6 +384,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
         type="file"
         accept={ACCEPT}
         className="sr-only"
+        // Opened by the visible drop button; keep it out of the tab order.
+        tabIndex={-1}
+        aria-hidden="true"
         onChange={(e) => {
           pick(e.target.files);
           e.target.value = "";

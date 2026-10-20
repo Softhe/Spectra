@@ -45,6 +45,9 @@ function probeWorker(): Promise<boolean> {
       }
       const timer = window.setTimeout(() => {
         worker.terminate();
+        // Slow is not broken (cold chunk fetch, busy main thread): fall back
+        // for this run only and probe again next time. Only onerror sticks.
+        probe = null;
         resolve(false);
       }, 2500);
       worker.onmessage = (e: MessageEvent) => {

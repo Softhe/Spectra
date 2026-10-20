@@ -534,3 +534,131 @@ describe("sniffContainer: ID3-tagged FLAC", () => {
     assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["FLAC", 44100, 2, 16]);
   });
 });
+
+describe("sniffContainer: WAV payloads and RF64", () => {
+  const wavWith = (magic: string, format: number, extra: number[] = []) => {
+    const fmt = [
+      ...le16(format),
+      ...le16(2),
+      ...le32(44100),
+      ...le32(16000),
+      ...le16(4),
+      ...le16(format === 0x55 ? 0 : 16),
+      ...extra,
+    ];
+    return [
+      ...bytesOf(magic),
+      ...le32(36),
+      ...bytesOf("WAVE"),
+      ...bytesOf("fmt "),
+      ...le32(fmt.length),
+      ...fmt,
+      ...bytesOf("data"),
+      ...le32(0),
+    ];
+  };
+
+  it("labels an MP3-in-RIFF payload as MP3, not a lossless WAV", () => {
+    const r = sniffContainer(toBuffer(wavWith("RIFF", 0x55)), "a.wav", "audio/wav");
+    assert.equal(r.codec, "MP3");
+    assert.equal(r.bitDepth, null);
+    assert.doesNotMatch(r.codec, /FLAC|PCM|ALAC|WAV|AIFF|CAF/i);
+  });
+
+  it("reads the SubFormat of WAVE_FORMAT_EXTENSIBLE", () => {
+    // cbSize 22, valid bits, channel mask, then the SubFormat GUID (PCM = 1).
+    const ext = [...le16(22), ...le16(24), ...le32(3), ...le16(1), ...new Array(14).fill(0)];
+    const r = sniffContainer(toBuffer(wavWith("RIFF", 0xfffe, ext)), "a.wav", "audio/wav");
+    assert.equal(r.codec, "PCM");
+  });
+
+  it("parses RF64 headers like RIFF", () => {
+    const r = sniffContainer(toBuffer(wavWith("RF64", 1)), "a.wav", "audio/wav");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels], ["PCM", 44100, 2]);
+  });
+});
+
+describe("sniffContainer: stacked ID3 tags", () => {
+  it("skips two consecutive ID3v2 tags before a FLAC stream", () => {
+    const id3 = (n: number) => [
+      0x49,
+      0x44,
+      0x33,
+      4,
+      0,
+      0,
+      0,
+      0,
+      (n >> 7) & 0x7f,
+      n & 0x7f,
+      ...new Array(n).fill(0),
+    ];
+    const streaminfo = [
+      ...bytesOf("fLaC"),
+      0x80,
+      0,
+      0,
+      34,
+      0x10,
+      0,
+      0x10,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0x0a,
+      0xc4,
+      0x42,
+      0xf0,
+      ...new Array(32).fill(0),
+    ];
+    const r = sniffContainer(toBuffer([...id3(300), ...id3(500), ...streaminfo]), "t.flac", "");
+    assert.deepEqual([r.codec, r.sampleRate], ["FLAC", 44100]);
+  });
+});
+
+describe("sniffContainer: Ogg", () => {
+  it("recognises Ogg FLAC as FLAC with its STREAMINFO rate", () => {
+    const page = [...bytesOf("OggS"), 0, 2, ...new Array(20).fill(0), 1, 51];
+    const pkt = [
+      0x7f,
+      ...bytesOf("FLAC"),
+      1,
+      0,
+      0,
+      1,
+      ...bytesOf("fLaC"),
+      0x80,
+      0,
+      0,
+      34,
+      0x10,
+      0,
+      0x10,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0x0a,
+      0xc4,
+      0x42,
+      0xf0,
+      ...new Array(20).fill(0),
+    ];
+    const r = sniffContainer(toBuffer([...page, ...pkt]), "a.oga", "audio/ogg");
+    assert.deepEqual([r.codec, r.sampleRate], ["FLAC", 44100]);
+  });
+
+  it("drops an implausible Vorbis rate and channel count", () => {
+    const page = [...bytesOf("OggS"), 0, 2, ...new Array(20).fill(0), 1, 30];
+    const ident = [0x01, ...bytesOf("vorbis"), 0, 0, 0, 0, 0, ...le32(5), ...new Array(16).fill(0)];
+    const r = sniffContainer(toBuffer([...page, ...ident]), "a.ogg", "audio/ogg");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels], ["Vorbis", null, null]);
+  });
+});

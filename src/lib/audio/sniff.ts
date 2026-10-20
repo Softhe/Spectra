@@ -29,18 +29,23 @@ function hasVbrTag(frame: Uint8Array): boolean {
   );
 }
 
-function skipId3(view: DataView): number {
-  if (view.byteLength < 10) return 0;
-  if (view.getUint8(0) === 0x49 && view.getUint8(1) === 0x44 && view.getUint8(2) === 0x33) {
+/** Offset past every leading ID3v2 tag. Taggers sometimes stack several,
+ * and a tag with the footer flag (0x10) carries 10 more bytes. */
+function skipId3(bytes: Uint8Array): number {
+  let p = 0;
+  while (p + 10 <= bytes.length && ascii(bytes, p, 3) === "ID3") {
     const size =
-      ((view.getUint8(6) & 0x7f) << 21) |
-      ((view.getUint8(7) & 0x7f) << 14) |
-      ((view.getUint8(8) & 0x7f) << 7) |
-      (view.getUint8(9) & 0x7f);
-    return Math.min(view.byteLength, 10 + size);
+      ((bytes[p + 6]! & 0x7f) << 21) |
+      ((bytes[p + 7]! & 0x7f) << 14) |
+      ((bytes[p + 8]! & 0x7f) << 7) |
+      (bytes[p + 9]! & 0x7f);
+    p += 10 + size + (bytes[p + 5]! & 0x10 ? 10 : 0);
   }
-  return 0;
+  return Math.min(p, bytes.length);
 }
+
+const validChannels = (n: number | null | undefined): number | null =>
+  n != null && Number.isInteger(n) && n >= 1 && n <= 32 ? n : null;
 
 const MP3_BITRATE: Record<string, number[]> = {
   // MPEG-1 Layer III
@@ -91,8 +96,7 @@ function mp3Header(bytes: Uint8Array, pos: number): Mp3Header | null {
 }
 
 function parseMp3(bytes: Uint8Array): ContainerInfo | null {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const start = skipId3(view);
+  const start = skipId3(bytes);
   // A lone 0xFFEx pair is everywhere in compressed data (WebM, AAC, noise),
   // so a candidate only counts once a second, independent check agrees: the
   // next frame (one frame length later) is a header with the same version and
@@ -164,8 +168,24 @@ function parseMp3(bytes: Uint8Array): ContainerInfo | null {
   };
 }
 
+const WAV_FORMATS: Record<number, string> = {
+  0x0001: "PCM",
+  0x0003: "PCM float",
+  0x0002: "ADPCM",
+  0x0011: "ADPCM",
+  0x0006: "A-law",
+  0x0007: "µ-law",
+  0x0050: "MPEG",
+  0x0055: "MP3",
+  0x2000: "AC-3",
+};
+
 function parseWav(bytes: Uint8Array): ContainerInfo | null {
-  if (ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 4) !== "WAVE") return null;
+  // RF64/BW64 are RIFF with a ds64 chunk for >4 GB sizes; the fmt chunk is
+  // identical, and the ds64 chunk is skipped by its own size below.
+  const magic = ascii(bytes, 0, 4);
+  if ((magic !== "RIFF" && magic !== "RF64" && magic !== "BW64") || ascii(bytes, 8, 4) !== "WAVE")
+    return null;
   let i = 12;
   while (i + 8 < bytes.length) {
     const id = ascii(bytes, i, 4);
@@ -179,20 +199,21 @@ function parseWav(bytes: Uint8Array): ContainerInfo | null {
       const byteRate = view.getUint32(i + 16, true);
       const bitDepth = view.getUint16(i + 22, true);
       const claimedKbps = sampleRate > 0 ? Math.round((byteRate * 8) / 1000) : null;
-      const audioFormat = view.getUint16(i + 8, true);
-      const codec =
-        audioFormat === 1
-          ? "PCM"
-          : audioFormat === 3
-            ? "PCM float"
-            : audioFormat === 0xfffe
-              ? "WAV"
-              : "WAV";
+      let audioFormat = view.getUint16(i + 8, true);
+      // WAVE_FORMAT_EXTENSIBLE: the real format is the SubFormat GUID's
+      // leading u16 (cbSize 22 → SubFormat at fmt+24).
+      if (audioFormat === 0xfffe && size >= 40 && i + 34 <= bytes.length) {
+        audioFormat = view.getUint16(i + 32, true);
+      }
+      // Only PCM and float are lossless. A lossy payload in a RIFF wrapper
+      // (MP3, ADPCM, companded telephony) must not pass as "WAV", which the
+      // verdict treats as a lossless container.
+      const codec = WAV_FORMATS[audioFormat] ?? `RIFF 0x${audioFormat.toString(16)}`;
       return {
         codec,
-        sampleRate,
-        channels,
-        bitDepth,
+        sampleRate: validRate(sampleRate),
+        channels: validChannels(channels),
+        bitDepth: bitDepth || null,
         claimedKbps,
         vbr: false,
       };
@@ -213,15 +234,7 @@ function parseWav(bytes: Uint8Array): ContainerInfo | null {
 
 function parseFlac(bytes: Uint8Array): ContainerInfo | null {
   // Tagged FLACs start with an ID3v2 prefix — skip it before the fLaC check.
-  let base = 0;
-  if (ascii(bytes, 0, 3) === "ID3" && bytes.length > 10) {
-    const size =
-      ((bytes[6]! & 0x7f) << 21) |
-      ((bytes[7]! & 0x7f) << 14) |
-      ((bytes[8]! & 0x7f) << 7) |
-      (bytes[9]! & 0x7f);
-    base = Math.min(bytes.length, 10 + size);
-  }
+  const base = skipId3(bytes);
   if (ascii(bytes, base, 4) !== "fLaC") return null;
   // STREAMINFO block starts at base+8; sample rate is 20 bits at base+18.
   if (bytes.length < base + 26) {
@@ -601,7 +614,8 @@ function parseOgg(bytes: Uint8Array): ContainerInfo | null {
   if (ascii(bytes, 0, 4) !== "OggS") return null;
   if (findAscii(bytes.subarray(0, 128), "OpusHead") >= 0) {
     const head = findAscii(bytes, "OpusHead");
-    const channels = head >= 0 && head + 9 < bytes.length ? bytes[head + 9]! : 2;
+    const channels =
+      head >= 0 && head + 9 < bytes.length ? (validChannels(bytes[head + 9]) ?? 2) : 2;
     return {
       codec: "Opus",
       sampleRate: 48000,
@@ -623,11 +637,18 @@ function parseOgg(bytes: Uint8Array): ContainerInfo | null {
       for (let j = 0; j < magic.length; j++) {
         if (bytes[i + j] !== magic[j]) continue outer;
       }
-      channels = bytes[i + 11]!;
-      sampleRate = readU32(bytes, i + 12, false);
+      channels = validChannels(bytes[i + 11]);
+      sampleRate = validRate(readU32(bytes, i + 12, false));
       break;
     }
     return { codec: "Vorbis", sampleRate, channels, bitDepth: null, claimedKbps: null, vbr: true };
+  }
+  // Ogg FLAC: first packet is 0x7F "FLAC" + version + header count, then a
+  // native "fLaC" stream marker and STREAMINFO.
+  const oggFlac = findAscii(bytes.subarray(0, 256), "\x7fFLAC");
+  if (oggFlac >= 0) {
+    const info = parseFlac(bytes.subarray(oggFlac + 9));
+    if (info) return info;
   }
   return {
     codec: "Ogg",

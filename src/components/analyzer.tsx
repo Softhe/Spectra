@@ -186,11 +186,13 @@ export function Analyzer() {
         void run("b", files[1]!);
         return;
       }
-      const target: SlotId =
-        slots.a.status === "idle" ? "a" : slots.b.status === "idle" ? "b" : "a";
+      // A slot that is empty or failed is free; never overwrite a good result
+      // while the other side is waiting for a retry.
+      const free = (s: SlotState) => s.status === "idle" || s.status === "error";
+      const target: SlotId = free(slots.a) ? "a" : free(slots.b) ? "b" : "a";
       void run(target, files[0]!);
     },
-    [run, slots.a.status, slots.b.status, showDropNotice],
+    [run, slots.a, slots.b, showDropNotice],
   );
 
   const a = analysisOf(slots.a);
@@ -216,6 +218,9 @@ export function Analyzer() {
   // A/B compare: which slot the verdict button started (null = manual play).
   const [abPlaying, setAbPlaying] = useState<SlotId | null>(null);
   const abArmed = useRef(false);
+  // Switch generation: a stale seek/play from an outpaced switch must never
+  // disturb the newest one (otherwise two exclusivity pauses silence both).
+  const switchSeq = useRef(0);
   // Non-zero while an abSwitch is between its start and the target's play
   // event (crossfade + seek). Pauses during that window are the switch's own
   // doing and must not end the A/B session.
@@ -252,6 +257,10 @@ export function Analyzer() {
   // (otherwise a freshly loaded slot can stay attenuated by the old ratio).
   useEffect(() => {
     setAbPlaying(null);
+    // Orphan any in-flight switch: its delayed play() must not start an
+    // element that was just cleared or replaced.
+    switchSeq.current++;
+    abArmed.current = false;
     switchPending.current = 0;
     matchRef.current = { a: 1, b: 1 };
     abAnalyses.current = a && b ? { a, b } : null;
@@ -408,10 +417,6 @@ export function Analyzer() {
     }, 600);
   }, []);
 
-  // Switch generation: a stale seek/play from an outpaced switch must never
-  // disturb the newest one (otherwise two exclusivity pauses silence both).
-  const switchSeq = useRef(0);
-
   const abSwitch = useCallback(
     (target: SlotId) => {
       const pair = abAnalyses.current;
@@ -427,7 +432,12 @@ export function Analyzer() {
       }
       // Continue where the other preview left off. The seek is issued below
       // (once, after the crossfade starts) so decode stalls stay silent.
-      const otherTime = otherEl && !otherEl.paused ? otherEl.currentTime : null;
+      // A paused session resumes from the copy heard last, not from the
+      // target's own stale position.
+      const otherTime =
+        otherEl && (!otherEl.paused || otherEl.dataset.slot === lastPlayedRef.current)
+          ? otherEl.currentTime
+          : null;
       const t = otherTime ?? targetEl.currentTime;
       // Loudness match on RMS so the switch compares quality, not volume.
       // Stored as ratios against the global volume (which never moves here),
@@ -452,7 +462,7 @@ export function Analyzer() {
       targetEl.volume = targetVolume;
 
       const startTarget = () => {
-        if (switchSeq.current !== mySwitch) return;
+        if (switchSeq.current !== mySwitch || !targetEl.isConnected) return;
         if (!targetEl.paused) {
           // Already playing (manual preview, or still fading out from a
           // switch this one supersedes): play() would fire no event, leaving
@@ -524,9 +534,10 @@ export function Analyzer() {
   // modifier chords, which belong to the browser.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+      // composedPath sees through shadow roots (e.target is retargeted).
+      const t = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
       const key = e.key.toLowerCase();
       if (key !== "a" && key !== "b") return;
       if (!(a && b)) return;
@@ -592,18 +603,21 @@ export function Analyzer() {
           </div>
         </header>
 
-        {dropNotice && (
-          <p
-            role="status"
-            aria-live="polite"
-            className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-warn shadow-[var(--shadow-border)]"
-          >
-            {dropNotice}
-          </p>
-        )}
+        {/* Always-mounted live regions: a region inserted together with its
+            text is usually not announced. */}
+        <p role="status" aria-live="polite" className="sr-only">
+          {identical && a && b ? "Identical files, no comparison" : (comparison?.headline ?? "")}
+        </p>
+        <div role="status" aria-live="polite">
+          {dropNotice && (
+            <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-warn shadow-[var(--shadow-border)]">
+              {dropNotice}
+            </p>
+          )}
+        </div>
 
         {identical && a && b ? (
-          <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
+          <aside className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
             <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
               <Info className="size-3.5 text-info" />
               Identical files · no comparison
@@ -684,7 +698,7 @@ function Verdict({
   const next = abPlaying === "a" ? "b" : "a";
 
   return (
-    <aside aria-live="polite" className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
+    <aside className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
       <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
         {decided && <Trophy className="size-3.5 text-win" />}
         {decided

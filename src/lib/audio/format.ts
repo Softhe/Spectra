@@ -34,7 +34,8 @@ export function formatDb(db: number, digits = 1): string {
 
 export function formatSampleRate(hz: number): string {
   if (!Number.isFinite(hz)) return "—";
-  if (hz >= 1000) return `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)} kHz`;
+  // 11025 → "11.025 kHz", 22050 → "22.05 kHz", 44100 → "44.1 kHz".
+  if (hz >= 1000) return `${Number((hz / 1000).toFixed(3))} kHz`;
   return `${Math.round(hz)} Hz`;
 }
 

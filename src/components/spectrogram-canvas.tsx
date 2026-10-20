@@ -187,13 +187,20 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
           title="Use ↑ / ↓ to probe frequencies with the keyboard"
           onPointerMove={onPointer}
           onPointerEnter={onPointer}
-          onPointerLeave={() => setHover(null)}
+          onPointerLeave={() => {
+            // A rAF queued by the last move would re-show the probe.
+            cancelAnimationFrame(hoverRaf.current);
+            setHover(null);
+          }}
           onKeyDown={onProbeKey}
           onFocus={() =>
             // Arriving by keyboard should show something to move immediately.
             setHover((h) => h ?? analysis.spectrogram.maxHz / 2)
           }
-          onBlur={() => setHover(null)}
+          onBlur={() => {
+            cancelAnimationFrame(hoverRaf.current);
+            setHover(null);
+          }}
         >
           <canvas
             ref={canvasRef}

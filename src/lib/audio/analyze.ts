@@ -15,6 +15,8 @@ import type {
 const FFT_SIZE = 4096;
 const HOP = 2048;
 const EPS = 1e-12;
+/** Per-bin power floor for occupancy (≈ 16-bit TPDF dither density). */
+const OCC_FLOOR_DB = -100;
 const DISPLAY_BINS = 512;
 const DISPLAY_MAX_HZ = 22050;
 
@@ -69,11 +71,13 @@ async function mixDownWithStats(
   // `run` carries across chunk boundaries by construction.
   let run = 0;
   let clipRun = 0;
-  const tally = (v: number, i: number) => {
+  // `a` and `pw` come from the individual channels, not the mix: a clipped
+  // L under a quieter R averages below the clip level, and an out-of-phase
+  // pair cancels to silence, hiding both faults from peak/clip/RMS.
+  const tally = (v: number, i: number, a: number, pw: number) => {
     if (materialize) mono[i] = v;
-    const a = v < 0 ? -v : v;
     if (a > peak) peak = a;
-    sumSq += v * v;
+    sumSq += pw;
     if (a >= 0.999) {
       run++;
     } else {
@@ -86,7 +90,10 @@ async function mixDownWithStats(
     const data = buffer.getChannelData(0);
     for (let s = 0; s < n; s += CHUNK) {
       const end = Math.min(n, s + CHUNK);
-      for (let i = s; i < end; i++) tally(data[i]!, i);
+      for (let i = s; i < end; i++) {
+        const v = data[i]!;
+        tally(v, i, v < 0 ? -v : v, v * v);
+      }
       if (end < n) {
         await yieldToMain();
         throwIfAborted(signal);
@@ -100,8 +107,16 @@ async function mixDownWithStats(
       const end = Math.min(n, s + CHUNK);
       for (let i = s; i < end; i++) {
         let v = 0;
-        for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
-        tally(v * scale, i);
+        let mx = 0;
+        let pw = 0;
+        for (let c = 0; c < channels.length; c++) {
+          const x = channels[c]![i]!;
+          v += x;
+          pw += x * x;
+          const ax = x < 0 ? -x : x;
+          if (ax > mx) mx = ax;
+        }
+        tally(v * scale, i, mx, pw * scale);
       }
       if (end < n) {
         await yieldToMain();
@@ -445,7 +460,15 @@ function occupancyCurve(
     for (let k = midLo; k <= midHi; k++) {
       if (f[k]! > midPeak) midPeak = f[k]!;
     }
-    const thresh = midPeak - 44;
+    // A (near-)silent frame has no mid band to anchor on: its relative
+    // threshold sinks under the EPS clamp and every bin "has content" up to
+    // Nyquist, grading silence-padded lossy rips as full-band. Drop such
+    // frames, and never count a bin below the 16-bit noise floor.
+    if (midPeak < OCC_FLOOR_DB + 20) {
+      usedCount--;
+      continue;
+    }
+    const thresh = Math.max(midPeak - 44, OCC_FLOOR_DB);
     for (let k = 0; k < nBins; k++) {
       if (f[k]! > thresh) occ[k]! += 1;
     }
@@ -673,6 +696,14 @@ export async function detectCutoff(
     }
   }
 
+  // No lossy encoder low-passes above ~24 kHz; a cliff up there is a hi-res
+  // converter's anti-alias filter, not damage. Upsampled 44.1/48k sources
+  // still cliff at 21.6–24 kHz and stay flagged.
+  if (brickwallHz !== null && brickwallHz > 24500) {
+    rolloff = "natural";
+    brickwallHz = null;
+  }
+
   // A brickwall above where the edge was inferred proves content past it:
   // the inference was wrong, so judge against the decode Nyquist again.
   if (sourceEdge !== null && brickwallHz !== null && brickwallHz > sourceEdge - EDGE_BELOW) {
@@ -726,7 +757,12 @@ export async function detectCutoff(
   // No cliff found (cutoff rode to within a bin or two of Nyquist) yet no
   // real air: the ceiling is the music, not an encoder. Callers cap class.
   const sourceLimited =
-    rolloff === "natural" && cutoffHz >= sourceNyquistHz * 0.985 && hfOccupancy < 0.35;
+    rolloff === "natural" &&
+    // Below ~40 kHz rates there is no 16–20 kHz band to measure, so
+    // hfOccupancy is 0 by construction; let the absolute ladder grade them.
+    sourceNyquistHz >= 20000 &&
+    cutoffHz >= sourceNyquistHz * 0.985 &&
+    hfOccupancy < 0.35;
 
   return {
     cutoffHz,
@@ -1279,6 +1315,8 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
   // Strongly contradictory evidence caps confidence: a big bandwidth gap
   // means less when the composite score firmly disagrees, and vice versa.
   if (scoreOpposes && confidence === "high") confidence = "medium";
+  // "No winner" is not something to be confident about.
+  if (winner === "tie") confidence = "low";
 
   const better = winner === "tie" ? a : winner === "a" ? a : b;
   const worse = winner === "tie" ? b : winner === "a" ? b : a;

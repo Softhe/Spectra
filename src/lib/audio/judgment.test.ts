@@ -700,3 +700,55 @@ describe("decodeErrorMessage", () => {
     assert.equal(m, "Could not decode “song.m4a”. Try MP3, M4A, AAC, WAV, FLAC, or OGG.");
   });
 });
+
+describe("runDsp edge cases", () => {
+  // Band-limited deterministic noise: flat-ish up to `topHz`, nothing above.
+  function lowpassNoise(sr: number, topHz: number, n: number, amp = 0.5): Float32Array {
+    const re = new Float32Array(n);
+    const im = new Float32Array(n);
+    let seed = 11;
+    const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+    for (let k = 1; k < n / 2; k++) {
+      const f = (k * sr) / n;
+      if (f < 40 || f > topHz) continue;
+      const mag = Math.pow(f / 1000, -0.8);
+      const ph = rnd() * 2 * Math.PI;
+      re[k] = mag * Math.cos(ph);
+      im[k] = mag * Math.sin(ph);
+      re[n - k] = re[k]!;
+      im[n - k] = -im[k]!;
+    }
+    fft(re, im, true);
+    let peak = 0;
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(re[i]!));
+    for (let i = 0; i < n; i++) re[i] = (re[i]! / peak) * amp;
+    return re;
+  }
+
+  it("does not grade a low sample-rate file 'high' by default", async () => {
+    const r = await runDsp(lowpassNoise(8000, 3990, 1 << 17), 8000, 0);
+    assert.equal(r.sourceLimited, false);
+    assert.notEqual(r.qualityClass, "high");
+  });
+
+  it("does not read silence-padded lossy audio as full-band", async () => {
+    // 3 s of 16 kHz-limited noise inside 15 s of digital silence.
+    const sr = 44100;
+    const mono = new Float32Array(15 * sr);
+    mono.set(lowpassNoise(sr, 16000, 1 << 17), 6 * sr);
+    const r = await runDsp(mono, sr, 0);
+    assert.notEqual(r.qualityClass, "lossless");
+    assert.ok(r.cutoffHz < 17500, `cutoff ${r.cutoffHz}`);
+  });
+});
+
+describe("compareAnalyses tie confidence", () => {
+  it("never reports a tie with more than low confidence", () => {
+    const c = compareAnalyses(
+      mkAnalysis({ id: "A", cutoff: 20000, score: 70 }),
+      mkAnalysis({ id: "B", cutoff: 19000, score: 76 }),
+    );
+    assert.equal(c.winner, "tie");
+    assert.equal(c.confidence, "low");
+  });
+});
