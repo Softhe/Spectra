@@ -168,6 +168,101 @@ function parseMp3(bytes: Uint8Array): ContainerInfo | null {
   };
 }
 
+const ADTS_SR = [
+  96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
+
+type AdtsHeader = {
+  srIndex: number;
+  channelConfig: number;
+  /** Whole frame length in bytes, header included. */
+  len: number;
+  /** AAC raw data blocks in the frame (1024 core samples each). */
+  blocks: number;
+};
+
+/** Decode an ADTS header at `pos` (sync 0xFFF, layer 00), or null if invalid. */
+function adtsHeader(bytes: Uint8Array, pos: number): AdtsHeader | null {
+  if (pos + 7 > bytes.length) return null;
+  // FF F0/F1 (MPEG-4) or FF F8/F9 (MPEG-2): sync, ID, layer 00, protection.
+  if (bytes[pos] !== 0xff || (bytes[pos + 1]! & 0xf6) !== 0xf0) return null;
+  const b2 = bytes[pos + 2]!;
+  const b3 = bytes[pos + 3]!;
+  const srIndex = (b2 >> 2) & 0xf;
+  if (srIndex >= ADTS_SR.length) return null;
+  const channelConfig = ((b2 & 1) << 2) | (b3 >> 6);
+  const len = ((b3 & 3) << 11) | (bytes[pos + 4]! << 3) | (bytes[pos + 5]! >> 5);
+  const headerLen = bytes[pos + 1]! & 1 ? 7 : 9;
+  if (len <= headerLen) return null;
+  return { srIndex, channelConfig, len, blocks: (bytes[pos + 6]! & 3) + 1 };
+}
+
+/**
+ * Raw ADTS AAC (.aac). Like MP3, a sync word alone proves nothing, so a
+ * candidate needs a second header with the same rate index exactly one frame
+ * later (a third, away from the stream start; or, right at the start, to be
+ * the entire remaining stream). Must run
+ * before parseMp3, which rejects layer 00.
+ */
+function parseAdts(bytes: Uint8Array): ContainerInfo | null {
+  const start = skipId3(bytes);
+  const limit = Math.min(bytes.length - 7, start + 64 * 1024);
+  let offset = -1;
+  let first: AdtsHeader | null = null;
+  for (let pos = start; pos <= limit; pos++) {
+    if (bytes[pos] !== 0xff) continue;
+    const h = adtsHeader(bytes, pos);
+    if (!h) continue;
+    const next = adtsHeader(bytes, pos + h.len);
+    const linked = next !== null && next.srIndex === h.srIndex;
+    // Off the stream start (where MP3 / other compressed data may sit), a
+    // pair can still be chance: require a third linked header there.
+    const third = linked && pos !== start ? adtsHeader(bytes, pos + h.len + next.len) : null;
+    if (
+      pos === start
+        ? linked || pos + h.len === bytes.length
+        : third !== null && third.srIndex === h.srIndex
+    ) {
+      offset = pos;
+      first = h;
+      break;
+    }
+  }
+  if (!first) return null;
+
+  // Average bitrate over the frame chain: each raw data block is 1024 samples
+  // at the core rate the header signals (also true for HE-AAC, whose frames
+  // carry 1024 core samples at the halved rate).
+  const coreRate = ADTS_SR[first.srIndex]!;
+  let pos = offset;
+  let frames = 0;
+  let totalBytes = 0;
+  let totalBlocks = 0;
+  for (let h: AdtsHeader | null = first; h && frames < 50_000; frames++) {
+    totalBytes += h.len;
+    totalBlocks += h.blocks;
+    pos += h.len;
+    const next = adtsHeader(bytes, pos);
+    h = next && next.srIndex === first.srIndex ? next : null;
+  }
+  const claimedKbps =
+    frames >= 8 ? Math.round((totalBytes * 8 * coreRate) / (totalBlocks * 1024) / 1000) : null;
+
+  const ch = first.channelConfig;
+  return {
+    codec: "AAC",
+    // HE-AAC (SBR) signals the halved core rate in ADTS, so a low index may
+    // be half the real output rate — leave it unknown rather than resample
+    // away the SBR band (same caution as Matroska AAC).
+    sampleRate: coreRate >= 32000 ? coreRate : null,
+    // 0 = defined in a PCE; 7 = 7.1 (8 channels).
+    channels: ch === 0 ? null : ch === 7 ? 8 : ch,
+    bitDepth: null,
+    claimedKbps: claimedKbps && claimedKbps > 0 ? claimedKbps : null,
+    vbr: true,
+  };
+}
+
 const WAV_FORMATS: Record<number, string> = {
   0x0001: "PCM",
   0x0003: "PCM float",
@@ -298,6 +393,18 @@ function* mp4Boxes(bytes: Uint8Array, from: number, to: number, max = 4096): Gen
     if (i + size >= to) return;
     i += size;
   }
+}
+
+/** True when a well-formed box header (size ≥ 8 that fits, printable fourcc) sits at `i`. */
+function plausibleBox(bytes: Uint8Array, i: number, end: number): boolean {
+  if (i + 8 > end) return false;
+  const size = readU32(bytes, i);
+  if (size < 8 || i + size > end) return false;
+  for (let j = 4; j < 8; j++) {
+    const c = bytes[i + j]!;
+    if (c < 0x20 || c > 0x7e) return false;
+  }
+  return true;
 }
 
 function mp4Child(bytes: Uint8Array, parent: Mp4Box, type: string): Mp4Box | null {
@@ -441,8 +548,11 @@ function parseMoov(bytes: Uint8Array, moov: Mp4Box): Mp4Track | null {
 
     // AudioSampleEntry: reserved(6) + data_ref(2) + version(2) + revision(2) +
     // vendor(4) + channelcount(2) + samplesize(2) + compression(2) +
-    // packetsize(2) + samplerate(16.16) = 28 bytes; QuickTime v1 adds 16
-    // bytes before the child boxes, v2 replaces the layout entirely.
+    // packetsize(2) + samplerate(16.16) = 28 bytes; v2 replaces the layout
+    // entirely. Version 1 is ambiguous: QuickTime v1 adds 16 bytes (samples/
+    // bytes per packet/frame/sample) before the child boxes, but ISO
+    // AudioSampleEntryV1 keeps 28 bytes with its children (esds, srat, ...)
+    // right after — so probe for a plausible box at +28 before assuming +44.
     const e = entry.body;
     const version = e + 10 <= entry.end ? (bytes[e + 8]! << 8) | bytes[e + 9]! : -1;
     let entryRate: number | null = null;
@@ -453,7 +563,8 @@ function parseMoov(bytes: Uint8Array, moov: Mp4Box): Mp4Track | null {
       track.channels = ch >= 1 && ch <= 8 ? ch : null;
       sampleSize = (bytes[e + 18]! << 8) | bytes[e + 19]!;
       entryRate = validRate(readU32(bytes, e + 24) >>> 16);
-      childAt = e + 28 + (version === 1 ? 16 : 0);
+      childAt = e + 28;
+      if (version === 1 && !plausibleBox(bytes, childAt, entry.end)) childAt = e + 44;
     }
 
     let configRate: number | null = null;
@@ -465,6 +576,11 @@ function parseMoov(bytes: Uint8Array, moov: Mp4Box): Mp4Track | null {
           child.type === "wave" ? [...mp4Boxes(bytes, child.body, child.end, 64)] : [child];
         for (const c of inner) {
           if (c.type === "esds") esds = c;
+          // ISO v1 'srat' (FullBox + u32 sampling_rate): the true rate when
+          // it overflows the 16.16 entry field (> 65535 Hz).
+          if (c.type === "srat" && c.body + 8 <= c.end && configRate === null) {
+            configRate = validRate(readU32(bytes, c.body + 4));
+          }
           if (c.type === "dOps" && c.body + 2 <= c.end) {
             const ch = bytes[c.body + 1]!;
             if (ch >= 1 && ch <= 8) track.channels = ch;
@@ -1006,6 +1122,7 @@ export function sniffContainer(
     parseAiff(bytes) ??
     parseCaf(bytes) ??
     parseEbml(full) ??
+    parseAdts(full) ??
     parseMp3(full);
 
   if (parsed) {

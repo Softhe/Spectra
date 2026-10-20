@@ -53,9 +53,8 @@ export type Analysis = {
   scoreParts: ScoreParts;
   /** True when the ceiling reflects the music, not an encoder (caps class). */
   sourceLimited: boolean;
-  /** True when a very long file was analyzed from excerpts (memory guard). */
-  liteAnalysis: boolean;
-  /** Sampled content hash (IndexedDB key). Equal keys = identical bytes. */
+  /** Content hash (IndexedDB key): full SHA-256 up to 128 MB, striped above.
+   * A fast pre-check only — identical bytes are confirmed by a byte compare. */
   cacheKey: string | null;
   peakDb: number;
   rmsDb: number;

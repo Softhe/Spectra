@@ -84,9 +84,11 @@ export async function runDspParallel(
   throwIfAborted(signal);
 
   const jobId = ++jobSeq;
-  // No transfer: the mono buffer is structured-cloned (~100 ms worst case),
-  // which keeps the original usable so a wedged worker can fall back to the
-  // main-thread path instead of hanging forever on a detached buffer.
+  // No transfer: the mono buffer is structured-cloned, which keeps the
+  // original usable so a wedged worker can fall back to the main-thread path
+  // instead of hanging forever on a detached buffer. analyzeFile only ever
+  // passes the compact region+excerpt buffer (buildDspInput, ~28 s of mono
+  // at most), so the clone is a few MB regardless of file length or rate.
   const WORKER_TIMEOUT_MS = 60_000;
   let worker: Worker | null = null;
   try {

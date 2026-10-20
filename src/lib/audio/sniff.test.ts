@@ -662,3 +662,108 @@ describe("sniffContainer: Ogg", () => {
     assert.deepEqual([r.codec, r.sampleRate, r.channels], ["Vorbis", null, null]);
   });
 });
+
+// ── Raw ADTS AAC and ISO v1 sample entries ─────────────────────────────────
+
+/** One ADTS frame (no CRC): sampling index, channel config, total length. */
+const adtsFrame = (srIndex: number, ch: number, len: number) => {
+  const f = new Array<number>(len).fill(0);
+  f[0] = 0xff;
+  f[1] = 0xf1; // MPEG-4, layer 00, protection absent
+  f[2] = (1 << 6) | (srIndex << 2) | (ch >> 2); // profile LC
+  f[3] = ((ch & 3) << 6) | ((len >> 11) & 3);
+  f[4] = (len >> 3) & 0xff;
+  f[5] = ((len & 7) << 5) | 0x1f;
+  f[6] = 0xfc;
+  return f;
+};
+const adtsStream = (srIndex: number, ch: number, len: number, frames: number) =>
+  Array.from({ length: frames }, () => adtsFrame(srIndex, ch, len)).flat();
+
+const id3Tag = (size: number) => [
+  ...bytesOf("ID3"),
+  3,
+  0,
+  0,
+  (size >> 21) & 0x7f,
+  (size >> 14) & 0x7f,
+  (size >> 7) & 0x7f,
+  size & 0x7f,
+  ...new Array<number>(size).fill(0),
+];
+
+describe("sniffContainer: raw ADTS AAC", () => {
+  it("reads rate, channels and average kbps from an ADTS frame chain", () => {
+    // 44.1 kHz stereo, 372-byte frames of 1024 samples → ~128 kbps.
+    const r = sniffContainer(toBuffer(adtsStream(4, 2, 372, 20)), "song.aac", "audio/aac");
+    assert.deepEqual(
+      [r.codec, r.sampleRate, r.channels, r.claimedKbps, r.vbr],
+      ["AAC", 44100, 2, 128, true],
+    );
+  });
+
+  it("skips a leading ID3 tag", () => {
+    const b = [...id3Tag(300), ...adtsStream(3, 1, 200, 12)];
+    const r = sniffContainer(toBuffer(b), "tagged.aac", "");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels], ["AAC", 48000, 1]);
+  });
+
+  it("leaves a 24 kHz (possibly HE-AAC core) rate unknown", () => {
+    const r = sniffContainer(toBuffer(adtsStream(6, 2, 180, 12)), "he.aac", "audio/aac");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels], ["AAC", null, 2]);
+  });
+
+  it("does not accept a lone ADTS sync with no second header", () => {
+    const b = new Uint8Array(4096);
+    b.set(adtsFrame(4, 2, 372).slice(0, 7), 100);
+    const r = sniffContainer(b.buffer, "x.bin", "application/octet-stream");
+    assert.equal(r.sampleRate, null);
+  });
+});
+
+/** AudioSampleEntry version 1: ISO keeps 28 bytes; QuickTime adds 16. */
+const sampleEntryV1 = (
+  fourcc: string,
+  ch: number,
+  rate: number,
+  quicktime: boolean,
+  ...children: number[][]
+) =>
+  box(
+    fourcc,
+    [0, 0, 0, 0, 0, 0],
+    u16(1),
+    u16(1), // version 1
+    u16(0),
+    u32(0),
+    u16(ch),
+    u16(16),
+    u16(0),
+    u16(0),
+    u32(rate * 65536),
+    quicktime ? [...u32(1024), ...u32(0), ...u32(4), ...u32(2)] : [],
+    ...children,
+  );
+
+describe("sniffContainer: MP4 version-1 sample entries", () => {
+  it("walks ISO v1 children at +28: esds kbps and srat rate above 65535", () => {
+    const entry = sampleEntryV1(
+      "mp4a",
+      2,
+      0,
+      false,
+      esds(320_000, 256_000),
+      fullBox("srat", 0, u32(96000)),
+    );
+    const moov = box("moov", trak(96000, entry));
+    const r = sniffContainer(toBuffer([...ftyp(), ...moov]), "hi.m4a", "audio/mp4");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels, r.claimedKbps], ["AAC", 96000, 2, 256]);
+  });
+
+  it("still skips the 16 QuickTime v1 bytes before the children", () => {
+    const entry = sampleEntryV1("mp4a", 2, 44100, true, esds(160_000, 128_000));
+    const moov = box("moov", trak(44100, entry));
+    const r = sniffContainer(toBuffer([...ftyp(), ...moov]), "qt.m4a", "audio/mp4");
+    assert.deepEqual([r.codec, r.sampleRate, r.claimedKbps], ["AAC", 44100, 128]);
+  });
+});

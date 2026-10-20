@@ -59,8 +59,7 @@ async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array
     ph3 += inc(329.63);
     ph4 += inc(440);
 
-    const kick =
-      Math.sin(2 * Math.PI * (52 + beat * 8) * beat) * env(beat, 0.004, 14) * 0.72;
+    const kick = Math.sin(2 * Math.PI * (52 + beat * 8) * beat) * env(beat, 0.004, 14) * 0.72;
     const bass = saw(phBass) * 0.2 * (0.65 + 0.35 * Math.sin(2 * Math.PI * 0.5 * t));
     const pad =
       (saw(ph1) * 0.11 + saw(ph2) * 0.09 + saw(ph3) * 0.08 + saw(ph4) * 0.06) *
@@ -84,11 +83,19 @@ async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array
 
 async function brickwallChannel(input: Float32Array, cutoffHz: number): Promise<Float32Array> {
   const n = input.length;
+  // Only full FFT windows are processed, so zero-pad: a HOP of lead-in and
+  // enough tail that every real sample sits under two overlapping windows.
+  // Without it the last ~2k samples got no window at all and dropped to zero
+  // (an audible early cut-out with a broadband click in the "brickwalled"
+  // copy). Padding is deterministic, so the output stays byte-identical.
+  const len = FFT + HOP * Math.ceil((n + 2 * HOP - FFT) / HOP);
+  const padded = new Float32Array(len);
+  padded.set(input, HOP);
   const out = new Float32Array(n);
   const real = new Float32Array(FFT);
   const imag = new Float32Array(FFT);
-  const acc = new Float32Array(n);
-  const wsum = new Float32Array(n);
+  const acc = new Float32Array(len);
+  const wsum = new Float32Array(len);
   const binHz = SR / FFT;
   const passBin = Math.floor((cutoffHz - 400) / binHz);
   const stopBin = Math.floor(cutoffHz / binHz);
@@ -102,10 +109,10 @@ async function brickwallChannel(input: Float32Array, cutoffHz: number): Promise<
     }
   }
 
-  for (let pos = 0, steps = 0; pos + FFT <= n; pos += HOP, steps++) {
+  for (let pos = 0, steps = 0; pos + FFT <= len; pos += HOP, steps++) {
     real.fill(0);
     imag.fill(0);
-    for (let i = 0; i < FFT; i++) real[i] = input[pos + i]! * WIN[i]!;
+    for (let i = 0; i < FFT; i++) real[i] = padded[pos + i]! * WIN[i]!;
     fft(real, imag, false);
     for (let k = passBin; k <= FFT - passBin; k++) {
       real[k]! *= gain[k]!;
@@ -119,8 +126,8 @@ async function brickwallChannel(input: Float32Array, cutoffHz: number): Promise<
     if (steps % 24 === 0) await new Promise((r) => setTimeout(r, 0));
   }
   for (let i = 0; i < n; i++) {
-    const d = wsum[i]!;
-    out[i] = d > 1e-6 ? acc[i]! / d : 0;
+    const d = wsum[HOP + i]!;
+    out[i] = d > 1e-6 ? acc[HOP + i]! / d : 0;
   }
   return out;
 }

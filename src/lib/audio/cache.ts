@@ -1,17 +1,34 @@
 // Result cache: re-dropped files skip decode + DSP entirely.
-// Identity is a sampled content hash (first/mid/last 256 KB + byte size),
-// so renames and re-exports hit while different audio never collides.
+// Identity is a content hash that depends ONLY on the bytes (never the file
+// name or mtime), so renames and re-exports hit. Files up to FULL_HASH_MAX
+// are hashed in full; larger ones hash a dense stripe sample (head, tail and
+// evenly spaced stripes + byte size) to stay fast. A sampled key can in
+// theory collide for same-length files edited only between stripes, so the
+// "identical files" check never trusts a key alone — see filesIdentical().
 // objectUrls are per-session and never persisted.
 import type { Analysis } from "./types";
 
 /** Bump whenever detection constants OR the stored shape change. */
-export const DSP_VERSION = 6;
+export const DSP_VERSION = 7;
 
 const DB_NAME = "spectra-analyses";
 const STORE = "analyses";
 const SAVED_AT_INDEX = "by-savedAt";
 const MAX_ENTRIES = 50;
-const SAMPLE = 256 * 1024;
+/** On a quota failure, free this many more (oldest) entries, then retry once. */
+const QUOTA_EVICT = 10;
+/**
+ * Files at or below this size are hashed in full: every lossy file and
+ * nearly all FLAC / 16-bit WAV. Above it (long hi-res WAV/AIFF) a dense
+ * stripe sample keeps re-drops fast; the residual risk is two same-length
+ * files differing only between stripes (an edit shorter than ~1/256 of the
+ * file), which would share a cache entry.
+ */
+const FULL_HASH_MAX = 128 * 1024 * 1024;
+const EDGE_SAMPLE = 256 * 1024;
+const STRIPES = 256;
+const STRIPE = 32 * 1024;
+const COMPARE_CHUNK = 4 * 1024 * 1024;
 
 type StoredEntry = {
   key: string;
@@ -24,32 +41,85 @@ function hex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** FNV-1a 32-bit — weak, but only ever used when crypto.subtle is absent. */
-function fnv1a(bytes: Uint8Array): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < bytes.length; i++) {
-    h ^= bytes[i]!;
-    h = Math.imul(h, 0x01000193) >>> 0;
+/**
+ * Incremental 64-bit (two independent 32-bit lanes: FNV-1a + a murmur-style
+ * mix) — weak against adversaries, but only ever used when crypto.subtle is
+ * absent (insecure contexts), and collisions are vanishingly rare for the
+ * ≤50 entries the cache holds.
+ */
+class WeakHash {
+  private h1 = 0x811c9dc5;
+  private h2 = 0x9747b28c;
+  update(bytes: Uint8Array) {
+    let h1 = this.h1;
+    let h2 = this.h2;
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i]!;
+      h1 ^= b;
+      h1 = Math.imul(h1, 0x01000193);
+      h2 = Math.imul(h2 ^ b, 0x5bd1e995);
+      h2 ^= h2 >>> 15;
+    }
+    this.h1 = h1 >>> 0;
+    this.h2 = h2 >>> 0;
   }
-  return h.toString(16).padStart(8, "0");
+  digest(): string {
+    return this.h1.toString(16).padStart(8, "0") + this.h2.toString(16).padStart(8, "0");
+  }
+}
+
+/** Byte ranges hashed for a file too large to hash in full. */
+function sampleRanges(size: number): [number, number][] {
+  const ranges: [number, number][] = [[0, Math.min(size, EDGE_SAMPLE)]];
+  const lo = EDGE_SAMPLE;
+  const hi = size - EDGE_SAMPLE;
+  const span = hi - lo;
+  if (span > 0) {
+    for (let i = 0; i < STRIPES; i++) {
+      const start = lo + Math.floor(((span - STRIPE) * (i + 0.5)) / STRIPES);
+      ranges.push([Math.max(lo, start), Math.min(hi, start + STRIPE)]);
+    }
+  }
+  if (size > EDGE_SAMPLE) ranges.push([Math.max(EDGE_SAMPLE, size - EDGE_SAMPLE), size]);
+  return ranges;
 }
 
 export async function cacheKeyForFile(file: File): Promise<string | null> {
   try {
     const size = file.size;
-    const slices: Blob[] = [file.slice(0, SAMPLE)];
-    if (size > SAMPLE * 2) {
-      const mid = Math.max(0, Math.floor(size / 2 - SAMPLE / 2));
-      slices.push(file.slice(mid, mid + SAMPLE));
+    const full = size <= FULL_HASH_MAX;
+    const tag = full ? "f" : "s";
+    const sizeBytes = new TextEncoder().encode(`:${size}:`);
+    const hasSubtle = typeof crypto?.subtle?.digest === "function";
+
+    if (!hasSubtle) {
+      // Insecure contexts (LAN testing, hardened browsers) expose no
+      // crypto.subtle; degrade to a content-only weak hash, streamed in
+      // chunks so it never holds the whole file.
+      const h = new WeakHash();
+      const ranges: [number, number][] = full
+        ? Array.from({ length: Math.ceil(size / COMPARE_CHUNK) }, (_, i) => [
+            i * COMPARE_CHUNK,
+            Math.min(size, (i + 1) * COMPARE_CHUNK),
+          ])
+        : sampleRanges(size);
+      for (const [s, e] of ranges) {
+        h.update(new Uint8Array(await file.slice(s, e).arrayBuffer()));
+      }
+      h.update(sizeBytes);
+      return `v${DSP_VERSION}:w${tag}:${h.digest()}`;
     }
-    if (size > SAMPLE) {
-      slices.push(file.slice(Math.max(0, size - SAMPLE), size));
+
+    if (full) {
+      // The whole content already fixes the size; hash the buffer in place
+      // (no concatenated copy of a file up to 128 MB).
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      return `v${DSP_VERSION}:${tag}:${hex(digest)}`;
     }
     const parts: Uint8Array[] = [];
-    for (const s of slices) {
-      parts.push(new Uint8Array(await s.arrayBuffer()));
+    for (const [s, e] of sampleRanges(size)) {
+      parts.push(new Uint8Array(await file.slice(s, e).arrayBuffer()));
     }
-    const sizeBytes = new TextEncoder().encode(`:${size}:`);
     const total = parts.reduce((n, p) => n + p.length, 0) + sizeBytes.length;
     const joined = new Uint8Array(total);
     let off = 0;
@@ -58,17 +128,50 @@ export async function cacheKeyForFile(file: File): Promise<string | null> {
       off += p.length;
     }
     joined.set(sizeBytes, off);
-    // Insecure contexts (LAN testing, hardened browsers) expose no
-    // crypto.subtle; falling back to null would silently disable the
-    // identical-file tie, so degrade to a sampled FNV key instead.
-    if (typeof crypto?.subtle?.digest !== "function") {
-      const tag = new TextEncoder().encode(`${file.name}\u0000${file.lastModified}\u0000`);
-      return `v${DSP_VERSION}:w:${fnv1a(tag)}:${fnv1a(joined)}`;
-    }
     const digest = await crypto.subtle.digest("SHA-256", joined.buffer as ArrayBuffer);
-    return `v${DSP_VERSION}:${hex(digest)}`;
+    return `v${DSP_VERSION}:${tag}:${hex(digest)}`;
   } catch {
     return null;
+  }
+}
+
+function bytesEqual(x: ArrayBuffer, y: ArrayBuffer): boolean {
+  if (x.byteLength !== y.byteLength) return false;
+  const words = x.byteLength >>> 2;
+  const wx = new Uint32Array(x, 0, words);
+  const wy = new Uint32Array(y, 0, words);
+  for (let i = 0; i < words; i++) {
+    if (wx[i] !== wy[i]) return false;
+  }
+  const bx = new Uint8Array(x);
+  const by = new Uint8Array(y);
+  for (let i = words * 4; i < bx.length; i++) {
+    if (bx[i] !== by[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Exact byte-for-byte equality of two files, compared in 4 MB chunks so two
+ * huge files are never both held in memory. Unreadable files (moved or
+ * modified on disk since the drop) and an aborted check report `false`.
+ */
+export async function filesIdentical(a: Blob, b: Blob, signal?: AbortSignal): Promise<boolean> {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  try {
+    for (let off = 0; off < a.size; off += COMPARE_CHUNK) {
+      if (signal?.aborted) return false;
+      const end = Math.min(a.size, off + COMPARE_CHUNK);
+      const [x, y] = await Promise.all([
+        a.slice(off, end).arrayBuffer(),
+        b.slice(off, end).arrayBuffer(),
+      ]);
+      if (!bytesEqual(x, y)) return false;
+    }
+    return !signal?.aborted;
+  } catch {
+    return false;
   }
 }
 
@@ -129,9 +232,83 @@ export async function cacheGet(key: string): Promise<StoredEntry["analysis"] | n
   }
 }
 
+/**
+ * Settles when a readwrite transaction ends; resolves the abort/error reason
+ * (or null on commit). Every exit settles — a write never hangs.
+ */
+function runTx(
+  db: IDBDatabase,
+  body: (store: IDBObjectStore) => void,
+): Promise<DOMException | null | "failed"> {
+  return new Promise((resolve) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(STORE, "readwrite");
+    } catch {
+      resolve("failed");
+      return;
+    }
+    tx.oncomplete = () => resolve(null);
+    // A quota failure ABORTS the transaction; tx.error carries the reason.
+    tx.onabort = () => resolve(tx.error ?? "failed");
+    tx.onerror = () => {
+      // Followed by abort unless prevented; abort settles with the reason.
+    };
+    try {
+      body(tx.objectStore(STORE));
+    } catch {
+      try {
+        tx.abort();
+      } catch {
+        resolve("failed");
+      }
+    }
+  });
+}
+
+/**
+ * LRU eviction in its OWN transaction: frees entries from older DSP versions
+ * (dead weight) plus the oldest current ones so one slot opens under
+ * MAX_ENTRIES, plus `extra` more. Because it commits independently, a
+ * later quota failure on the put can no longer roll the deletes back.
+ */
+function evict(db: IDBDatabase, extra: number): Promise<DOMException | null | "failed"> {
+  return runTx(db, (store) => {
+    const counted = store.count();
+    counted.onsuccess = () => {
+      let over = counted.result - MAX_ENTRIES + 1 + extra;
+      // Walk the savedAt index (never deserializes the whole store).
+      const cursorReq = store.index(SAVED_AT_INDEX).openCursor();
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) return;
+        // Entries from an older DSP_VERSION can never be read again. They
+        // predate every current entry (versions only bump on deploy), so the
+        // savedAt cursor reaches them first; each was in the count, so it
+        // pays down `over` too instead of costing a current entry its slot.
+        if ((cursor.value as StoredEntry | undefined)?.version !== DSP_VERSION) {
+          cursor.delete();
+          over--;
+          cursor.continue();
+          return;
+        }
+        if (over <= 0) return;
+        cursor.delete();
+        over--;
+        cursor.continue();
+      };
+    };
+  });
+}
+
+function isQuota(err: DOMException | null | "failed"): boolean {
+  return typeof err === "object" && err !== null && err.name === "QuotaExceededError";
+}
+
 export async function cachePut(key: string, analysis: Analysis): Promise<void> {
+  let db: IDBDatabase | null = null;
   try {
-    const db = await openDb();
+    db = await openDb();
     if (!db) return;
     const { objectUrl: _drop, ...rest } = analysis;
     const entry: StoredEntry = {
@@ -140,70 +317,21 @@ export async function cachePut(key: string, analysis: Analysis): Promise<void> {
       savedAt: Date.now(),
       analysis: { ...rest, objectUrl: "" },
     };
-    await new Promise<void>((resolve) => {
-      // A quota failure ABORTS the transaction (no error event on the tx), so
-      // complete, error and abort all settle; close() is idempotent.
-      const finish = () => {
-        db.close();
-        resolve();
-      };
-      let tx: IDBTransaction;
-      try {
-        tx = db.transaction(STORE, "readwrite");
-      } catch {
-        finish();
-        return;
-      }
-      const store = tx.objectStore(STORE);
-      // LRU eviction BEFORE the put: delete the oldest entries past budget
-      // via the savedAt index cursor, so the write itself can never be a
-      // victim and we never deserialize the whole store (the old getAll
-      // pulled ~1 MB × entries on every save).
-      const counted = store.count();
-      counted.onsuccess = () => {
-        let over = counted.result - MAX_ENTRIES + 1;
-        if (over <= 0) {
-          store.put(entry);
-          return;
-        }
-        const cursorReq = store.index(SAVED_AT_INDEX).openCursor();
-        cursorReq.onsuccess = () => {
-          const cursor = cursorReq.result;
-          if (!cursor) {
-            store.put(entry);
-            return;
-          }
-          // Entries from an older DSP_VERSION can never be read again —
-          // they are dead weight, not history. They predate every current
-          // entry (versions only bump on deploy), so the savedAt cursor frees
-          // them first; each was in the count, so it pays down `over` too
-          // instead of costing a current entry its slot.
-          if ((cursor.value as StoredEntry | undefined)?.version !== DSP_VERSION) {
-            cursor.delete();
-            over--;
-            cursor.continue();
-            return;
-          }
-          if (over <= 0) {
-            store.put(entry);
-            return;
-          }
-          cursor.delete();
-          over--;
-          cursor.continue();
-        };
-        cursorReq.onerror = () => {
-          store.put(entry);
-        };
-      };
-      counted.onerror = () => {
-        store.put(entry);
-      };
-      tx.oncomplete = finish;
-      tx.onerror = finish;
-      tx.onabort = finish;
-    });
+    const conn = db;
+    // Eviction BEFORE the put, committed separately, so the write itself is
+    // never a victim and a failed put cannot undo the freed space.
+    await evict(conn, 0);
+    const put = () => runTx(conn, (store) => void store.put(entry));
+    const err = await put();
+    if (isQuota(err)) {
+      // Storage is full even within budget (big entries, or the origin's
+      // quota shrank): free the oldest few in a fresh transaction, retry once.
+      await evict(conn, QUOTA_EVICT);
+      await put();
+    }
   } catch {
-    // Quota or privacy mode: analysis just re-runs next time.
+    // Quota or privacy mode: analysis just re-runs next time (best-effort).
+  } finally {
+    db?.close();
   }
 }

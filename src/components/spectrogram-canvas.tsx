@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -14,12 +15,38 @@ import { cn } from "@/lib/utils";
 
 const lut = buildLut();
 
+/**
+ * Calls `onChange` whenever devicePixelRatio changes (window dragged to a
+ * monitor with a different scale, browser zoom). A resolution media query
+ * only fires once, so it re-subscribes at the new ratio each time.
+ */
+function watchDpr(onChange: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+  let mql: MediaQueryList | null = null;
+  const handler = () => {
+    subscribe();
+    onChange();
+  };
+  const subscribe = () => {
+    mql?.removeEventListener("change", handler);
+    mql = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    mql.addEventListener("change", handler);
+  };
+  subscribe();
+  return () => mql?.removeEventListener("change", handler);
+}
+
 type Props = {
   analysis: Analysis;
+  /** Slot name for the probe's accessible label, e.g. "File A". */
+  label?: string;
   className?: string;
 };
 
-export function SpectrogramCanvas({ analysis, className }: Props) {
+export function SpectrogramCanvas({ analysis, label, className }: Props) {
+  const descId = useId();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hoverRaf = useRef(0);
@@ -115,13 +142,22 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
       raf = requestAnimationFrame(draw);
     });
     ro.observe(wrap);
+    const unwatchDpr = watchDpr(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(draw);
+    });
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      unwatchDpr();
     };
   }, [draw]);
 
   const hoverStepHz = 500;
+  const pageStepHz = 2000;
+  const maxHz = analysis.spectrogram.maxHz;
+  // Keyboard probing starts at the measured ceiling — the line that matters.
+  const restHz = Math.max(0, Math.min(maxHz, analysis.cutoffHz));
 
   function onPointer(e: PointerEvent<HTMLDivElement>) {
     // Pointermove fires faster than React can usefully re-render; coalesce
@@ -139,8 +175,10 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
 
   function onProbeKey(e: KeyboardEvent<HTMLDivElement>) {
     let delta = 0;
-    if (e.key === "ArrowUp") delta = hoverStepHz;
-    else if (e.key === "ArrowDown") delta = -hoverStepHz;
+    if (e.key === "ArrowUp" || e.key === "ArrowRight") delta = hoverStepHz;
+    else if (e.key === "ArrowDown" || e.key === "ArrowLeft") delta = -hoverStepHz;
+    else if (e.key === "PageUp") delta = pageStepHz;
+    else if (e.key === "PageDown") delta = -pageStepHz;
     else if (e.key === "Home") {
       e.preventDefault();
       setHover(analysis.spectrogram.maxHz);
@@ -154,10 +192,16 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
     }
     e.preventDefault();
     setHover((h) => {
-      const base = h ?? analysis.spectrogram.maxHz / 2;
+      const base = h ?? restHz;
       return Math.max(0, Math.min(analysis.spectrogram.maxHz, base + delta));
     });
   }
+
+  // The slider value: the live probe, else where keyboard probing starts.
+  const probeHz = hover ?? restHz;
+  const probeText = `${formatHz(probeHz)}${
+    probeHz > analysis.cutoffHz + 50 ? ", above the ceiling" : ""
+  }`;
 
   // Keyboard probes need a percentage position — no rect measurement at
   // render time. Pointer probes land on the same representation.
@@ -183,6 +227,14 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
         <div
           ref={wrapRef}
           tabIndex={0}
+          role="slider"
+          aria-label={`Frequency probe${label ? `, ${label}` : ""}`}
+          aria-describedby={descId}
+          aria-orientation="vertical"
+          aria-valuemin={0}
+          aria-valuemax={Math.round(maxHz)}
+          aria-valuenow={Math.round(probeHz)}
+          aria-valuetext={probeText}
           className="relative h-48 w-full overflow-hidden rounded-md bg-bg-inset outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:h-64"
           title="Use ↑ / ↓ to probe frequencies with the keyboard"
           onPointerMove={onPointer}
@@ -195,19 +247,16 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
           onKeyDown={onProbeKey}
           onFocus={() =>
             // Arriving by keyboard should show something to move immediately.
-            setHover((h) => h ?? analysis.spectrogram.maxHz / 2)
+            setHover((h) => h ?? restHz)
           }
           onBlur={() => {
             cancelAnimationFrame(hoverRaf.current);
             setHover(null);
           }}
         >
-          <canvas
-            ref={canvasRef}
-            className="block size-full"
-            role="img"
-            aria-label={`Spectrogram of ${analysis.fileName}, ceiling ${formatHz(analysis.cutoffHz)}`}
-          />
+          {/* Slider children are presentational; the picture is described
+              via aria-describedby instead of role="img". */}
+          <canvas ref={canvasRef} className="block size-full" aria-hidden="true" />
           {hoverTop != null && (
             <div
               className="pointer-events-none absolute inset-x-0 h-px bg-fg/70"
@@ -215,6 +264,9 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
             />
           )}
         </div>
+        <p id={descId} className="sr-only">
+          {`Spectrogram of ${analysis.fileName}, ceiling ${formatHz(analysis.cutoffHz)}. Use the up and down arrow keys to probe frequencies.`}
+        </p>
         <div className="mt-1.5 flex justify-between font-mono text-[11px] text-faint">
           <span>{analysis.spectrogram.excerptStartSec.toFixed(1)}s</span>
           <span>excerpt</span>
@@ -242,7 +294,9 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
           </span>
         </div>
         {hover != null && (
-          <div className="mt-1 font-mono text-[11px] text-fg tabular-nums">{formatHz(hover)}</div>
+          <div aria-hidden="true" className="mt-1 font-mono text-[11px] text-fg tabular-nums">
+            {formatHz(hover)}
+          </div>
         )}
       </div>
     </div>

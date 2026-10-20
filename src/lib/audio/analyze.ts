@@ -40,8 +40,7 @@ export function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new CancelledError();
 }
 
-type MonoStats = {
-  mono: Float32Array;
+type LevelStats = {
   peakDb: number;
   rmsDb: number;
   crestDb: number;
@@ -49,18 +48,14 @@ type MonoStats = {
 };
 
 /**
- * Mix down to mono while measuring peak/RMS/clipping in the same pass.
- * Chunked with yields so a full-length song doesn't freeze the tab
- * (previously two separate synchronous passes over the whole buffer).
+ * Measure peak/RMS/clipping over the whole buffer in one chunked pass, with
+ * yields so a full-length song doesn't freeze the tab. Never materializes a
+ * full-length mono mix: the DSP only ever reads ~30 s of it, and on a long
+ * hi-res file that array alone was hundreds of MB (plus its worker clone).
  */
-async function mixDownWithStats(
-  buffer: AudioBuffer,
-  materialize = true,
-  signal?: AbortSignal,
-): Promise<MonoStats> {
+async function measureLevels(buffer: AudioBuffer, signal?: AbortSignal): Promise<LevelStats> {
   const n = buffer.length;
   const ch = buffer.numberOfChannels;
-  const mono = materialize ? new Float32Array(n) : new Float32Array(0);
   let peak = 0;
   let sumSq = 0;
   const CHUNK = 1 << 20;
@@ -74,8 +69,7 @@ async function mixDownWithStats(
   // `a` and `pw` come from the individual channels, not the mix: a clipped
   // L under a quieter R averages below the clip level, and an out-of-phase
   // pair cancels to silence, hiding both faults from peak/clip/RMS.
-  const tally = (v: number, i: number, a: number, pw: number) => {
-    if (materialize) mono[i] = v;
+  const tally = (a: number, pw: number) => {
     if (a > peak) peak = a;
     sumSq += pw;
     if (a >= 0.999) {
@@ -92,7 +86,7 @@ async function mixDownWithStats(
       const end = Math.min(n, s + CHUNK);
       for (let i = s; i < end; i++) {
         const v = data[i]!;
-        tally(v, i, v < 0 ? -v : v, v * v);
+        tally(v < 0 ? -v : v, v * v);
       }
       if (end < n) {
         await yieldToMain();
@@ -106,17 +100,15 @@ async function mixDownWithStats(
     for (let s = 0; s < n; s += CHUNK) {
       const end = Math.min(n, s + CHUNK);
       for (let i = s; i < end; i++) {
-        let v = 0;
         let mx = 0;
         let pw = 0;
         for (let c = 0; c < channels.length; c++) {
           const x = channels[c]![i]!;
-          v += x;
           pw += x * x;
           const ax = x < 0 ? -x : x;
           if (ax > mx) mx = ax;
         }
-        tally(v * scale, i, mx, pw * scale);
+        tally(mx, pw * scale);
       }
       if (end < n) {
         await yieldToMain();
@@ -130,7 +122,6 @@ async function mixDownWithStats(
   const peakDb = 20 * Math.log10(peak + EPS);
   const rmsDb = 20 * Math.log10(rms + EPS);
   return {
-    mono,
     peakDb,
     rmsDb,
     crestDb: peakDb - rmsDb,
@@ -236,39 +227,25 @@ function rankWindows(
 }
 
 export function pickRegions(samples: Float32Array, sampleRate: number): Region[] {
-  const length = samples.length;
+  return pickRegionsTap(samples.length, sampleRate, (i) => samples[i]!);
+}
+
+/**
+ * Region choice over any sample source (`tap(i)` = mono sample i), so the
+ * slice path can rank windows without a full-length mono array.
+ */
+function pickRegionsTap(length: number, sampleRate: number, tap: (i: number) => number): Region[] {
   const totalSec = length / sampleRate;
   if (totalSec <= 8) return [{ start: 0, end: length }];
 
   const windowSec = Math.min(4, totalSec / 3);
   const win = Math.floor(windowSec * sampleRate);
-  const clamp = (start: number): Region => {
-    const s = Math.max(0, Math.min(start, length - win));
-    return { start: s, end: s + win };
-  };
-
-  // Short files: fixed fractions as before.
-  if (totalSec < 20) {
-    return [0.15, 0.5, 0.75].map((f) => clamp(Math.floor(f * length)));
-  }
-
-  // Long files: score 6 candidate windows by loudness, keep the loudest 4.
-  // A fade-out or silence landing in a fixed window used to dilute occupancy
-  // by 25%; loudness ranking makes that structurally impossible.
-  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, (i) => samples[i]!);
-  return rankWindows(blockRms, nBlocks, block, length, win, 4);
-}
-
-/** Region picking for very long files without materializing full mono. */
-export function pickRegionsFromBuffer(buffer: AudioBuffer): Region[] {
-  const length = buffer.length;
-  const sampleRate = buffer.sampleRate;
-  const totalSec = length / sampleRate;
-  const windowSec = Math.min(4, totalSec / 3);
-  const win = Math.floor(windowSec * sampleRate);
-  const ch0 = buffer.getChannelData(0);
-  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, (i) => ch0[i]!);
-  return rankWindows(blockRms, nBlocks, block, length, win, 4);
+  // Score 6 candidate windows by loudness and keep the loudest (3 for short
+  // clips, 4 for songs). A fade-out or silence landing in a fixed window used
+  // to dilute occupancy by up to a third; loudness ranking makes that
+  // structurally impossible — on short clips as well as long songs.
+  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, tap);
+  return rankWindows(blockRms, nBlocks, block, length, win, totalSec < 20 ? 3 : 4);
 }
 
 export function excerptRegion(length: number, sampleRate: number): Region {
@@ -279,6 +256,71 @@ export function excerptRegion(length: number, sampleRate: number): Region {
   let start = Math.floor(startFrac * length);
   if (start + samples > length) start = Math.max(0, length - samples);
   return { start, end: start + samples };
+}
+
+/**
+ * Everything runDsp reads, without a full-length mono mix: picks the
+ * analysis regions and display excerpt on the fly from the channels, then
+ * mixes only those spans (overlaps merged, so a short file's spans collapse
+ * to one copy of the file) into a compact buffer with local offsets.
+ * Bounded at ~28 s of mono (4 × 4 s regions + 12 s excerpt) at any length
+ * or sample rate, and runDsp on it returns exactly what it returns on the
+ * full mono mix.
+ */
+export function buildDspInput(
+  channels: Float32Array[],
+  sampleRate: number,
+): { mono: Float32Array; spans: DspSpans } {
+  const length = channels.reduce((m, c) => Math.min(m, c.length), Infinity);
+  const scale = 1 / Math.max(1, channels.length);
+  // Must round exactly like a stored Float32 mono sample, so region ranking
+  // and STFT input are bit-identical to the materialized-mix path.
+  const tap =
+    channels.length === 1
+      ? (i: number) => channels[0]![i]!
+      : (i: number) => {
+          let v = 0;
+          for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
+          return Math.fround(v * scale);
+        };
+
+  const regions = pickRegionsTap(length, sampleRate, tap);
+  const excerpt = excerptRegion(length, sampleRate);
+
+  const segments: Region[] = [];
+  for (const r of [...regions, excerpt].sort((x, y) => x.start - y.start)) {
+    const last = segments[segments.length - 1];
+    if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+    else segments.push({ start: r.start, end: r.end });
+  }
+  const offsets: number[] = [];
+  let total = 0;
+  for (const seg of segments) {
+    offsets.push(total);
+    total += seg.end - seg.start;
+  }
+  const mono = new Float32Array(total);
+  segments.forEach((seg, k) => {
+    const off = offsets[k]! - seg.start;
+    for (let i = seg.start; i < seg.end; i++) mono[off + i] = tap(i);
+  });
+  const toLocal = (r: Region): Region => {
+    const k = segments.findIndex((seg) => r.start >= seg.start && r.end <= seg.end);
+    const shift = offsets[k]! - segments[k]!.start;
+    return { start: r.start + shift, end: r.end + shift };
+  };
+
+  return {
+    mono,
+    spans: {
+      regions: regions.map(toLocal),
+      excerpt: toLocal(excerpt),
+      // The compact buffer's offsets say nothing about where the excerpt
+      // lives in the song — carry the true wall-clock position.
+      excerptStartSec: excerpt.start / sampleRate,
+      excerptDurSec: (excerpt.end - excerpt.start) / sampleRate,
+    },
+  };
 }
 
 export async function stftPower(
@@ -830,7 +872,7 @@ export function scoreOf(input: {
     // valid corpus peaks at 0.14, so legit content keeps ~8 of these points.
     clarity: 12 * (1 - Math.min(1, input.bbFlatness * 3)),
     // Sustained clipping docks; isolated lossy-decoder overshoots don't count
-    // (they never form runs — see mixDownWithStats).
+    // (they never form runs — see measureLevels).
     clip: input.clipFraction > 0.002 ? -14 : input.clipFraction > 0.0003 ? -6 : 0,
   };
   let total = parts.ceiling + parts.rolloff + parts.air + parts.clarity + parts.clip;
@@ -920,7 +962,7 @@ function decodeBuffer(
           ok: (b: AudioBuffer) => void,
           err: (e: unknown) => void,
         ) => void
-      ).call(ctx, bytes.slice(0), resolve, reject);
+      ).call(ctx, bytes, resolve, reject);
     } catch (err) {
       reject(err);
     }
@@ -928,14 +970,32 @@ function decodeBuffer(
 }
 
 async function decodeNative(
-  buffer: ArrayBuffer,
+  bytes: ArrayBuffer,
+  reread: () => Promise<ArrayBuffer>,
   sampleRateHint: number | null,
 ): Promise<AudioBuffer> {
-  // decodeAudioData detaches the buffer it is given, so hand it a copy and
-  // only copy again if a retry is actually needed.
-  const tryRate = (rate: number, bytes: ArrayBuffer) => {
+  // decodeAudioData detaches the buffer it is given. Rather than copying the
+  // file bytes per attempt (two full copies alive during every decode), hand
+  // the first attempt the original and re-read the file only if a retry is
+  // actually needed. A buffer a failed attempt left attached is reused.
+  let pending: ArrayBuffer | null = bytes;
+  const take = async (): Promise<ArrayBuffer> => {
+    const b = pending && pending.byteLength > 0 ? pending : await reread();
+    pending = null;
+    return b;
+  };
+  const keep = (b: ArrayBuffer) => {
+    if (b.byteLength > 0) pending = b;
+  };
+  const tryRate = async (rate: number) => {
     const ctx = new OfflineAudioContext(2, 128, rate);
-    return decodeBuffer(ctx, bytes);
+    const b = await take();
+    try {
+      return await decodeBuffer(ctx, b);
+    } catch (err) {
+      keep(b);
+      throw err;
+    }
   };
 
   // Fallback rates are tried highest-first: if the container's reported rate
@@ -949,7 +1009,7 @@ async function decodeNative(
   let lastErr: unknown = null;
   for (const rate of candidates) {
     try {
-      return await tryRate(rate, buffer.slice(0));
+      return await tryRate(rate);
     } catch (err) {
       lastErr = err;
     }
@@ -963,7 +1023,7 @@ async function decodeNative(
     if (!AC) throw lastErr ?? new Error("No AudioContext available.");
     const ctx = new AC();
     try {
-      return await decodeBuffer(ctx, buffer.slice(0));
+      return await decodeBuffer(ctx, await take());
     } finally {
       void ctx.close();
     }
@@ -971,6 +1031,8 @@ async function decodeNative(
     throw lastErr instanceof Error
       ? lastErr
       : new Error("This browser could not decode that audio file.");
+  } finally {
+    pending = null;
   }
 }
 
@@ -978,8 +1040,8 @@ export type DspSpans = {
   regions: Region[];
   excerpt: Region;
   /**
-   * True excerpt position/duration in the ORIGINAL file. The lite path feeds
-   * a concatenated slice buffer, so local offsets would place the
+   * True excerpt position/duration in the ORIGINAL file. analyzeFile feeds
+   * a compact slice buffer (buildDspInput), so local offsets would place the
    * spectrogram's time axis at the wrong wall-clock position.
    */
   excerptStartSec?: number;
@@ -1063,8 +1125,8 @@ export async function runDsp(
   const spectrogram = resampleFramesToDisplay(
     excerptFrames,
     sampleRate,
-    // Lite path: the local offset is meaningless wall-clock-wise — the spans
-    // carry the true position in the original file.
+    // Slice buffer: the local offset is meaningless wall-clock-wise — the
+    // spans carry the true position in the original file.
     spans?.excerptStartSec ?? excerpt.start / sampleRate,
     spans?.excerptDurSec ?? (excerpt.end - excerpt.start) / sampleRate,
   );
@@ -1138,16 +1200,20 @@ export async function analyzeFile(
     }
   }
 
-  const arrayBuffer = await file.arrayBuffer();
+  let arrayBuffer: ArrayBuffer | null = await file.arrayBuffer();
   throwIfAborted(signal);
   const container = sniffContainer(arrayBuffer, file.name, file.type);
 
   onProgress?.("Decoding", 0.12);
-  let audio: AudioBuffer;
+  let audio: AudioBuffer | null;
   try {
-    audio = await decodeNative(arrayBuffer, container.sampleRate);
+    // decodeNative consumes (detaches) these bytes on its first attempt and
+    // re-reads the file only if a retry is needed — never two full copies.
+    audio = await decodeNative(arrayBuffer, () => file.arrayBuffer(), container.sampleRate);
   } catch {
     throw new Error(decodeErrorMessage(file.name, container.codec));
+  } finally {
+    arrayBuffer = null;
   }
   // Only a decode at the container's own rate is native; anything else is a
   // fallback guess and may have resampled the source. When the container
@@ -1170,71 +1236,25 @@ export async function analyzeFile(
   onProgress?.("Measuring", 0.28);
   throwIfAborted(signal);
   const width = stereoWidth(audio);
-
-  // Files over ~15 min would need 600 MB+ of float buffers; analyze slices
-  // (loudest windows + display excerpt) instead and say so in the UI.
-  const LONG_SEC = 15 * 60;
-  let mono: Float32Array;
-  let loud: { peakDb: number; rmsDb: number; crestDb: number; clipFraction: number };
-  let spans: DspSpans | undefined;
-  let liteAnalysis = false;
-  if (audio.duration > LONG_SEC) {
-    liteAnalysis = true;
-    const stats = await mixDownWithStats(audio, false, signal);
-    loud = stats;
-    throwIfAborted(signal);
-    const regions = pickRegionsFromBuffer(audio);
-    const excerpt = excerptRegion(audio.length, audio.sampleRate);
-    const chs: Float32Array[] = [];
-    for (let c = 0; c < audio.numberOfChannels; c++) chs.push(audio.getChannelData(c));
-    const scale = 1 / Math.max(1, chs.length);
-    const mixSlice = (s: number, e: number): Float32Array => {
-      const m = new Float32Array(Math.max(0, e - s));
-      for (let i = 0; i < m.length; i++) {
-        let v = 0;
-        for (let c = 0; c < chs.length; c++) v += chs[c]![s + i]!;
-        m[i] = v * scale;
-      }
-      return m;
-    };
-    const parts: Float32Array[] = [];
-    const localRegions: Region[] = [];
-    let off = 0;
-    for (const r of regions) {
-      const m = mixSlice(r.start, r.end);
-      localRegions.push({ start: off, end: off + m.length });
-      parts.push(m);
-      off += m.length;
-    }
-    const em = mixSlice(excerpt.start, excerpt.end);
-    const localExcerpt = { start: off, end: off + em.length };
-    parts.push(em);
-    off += em.length;
-    mono = new Float32Array(off);
-    let p = 0;
-    for (const part of parts) {
-      mono.set(part, p);
-      p += part.length;
-    }
-    // The display buffer is a concatenation, so its local offsets say nothing
-    // about where the spectrogram excerpt lives in the song — pass the true
-    // wall-clock position for the time axis.
-    spans = {
-      regions: localRegions,
-      excerpt: localExcerpt,
-      excerptStartSec: excerpt.start / audio.sampleRate,
-      excerptDurSec: (excerpt.end - excerpt.start) / audio.sampleRate,
-    };
-  } else {
-    const full = await mixDownWithStats(audio, true, signal);
-    mono = full.mono;
-    loud = full;
-  }
+  const loud = await measureLevels(audio, signal);
   throwIfAborted(signal);
+
+  // Memory is bounded by samples, not duration: the only full-length
+  // allocation is the decoded AudioBuffer itself. The DSP gets a compact
+  // mono buffer of just the regions + excerpt it reads (~28 s max), and the
+  // AudioBuffer is released before the worker runs.
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < audio.numberOfChannels; c++) channels.push(audio.getChannelData(c));
+  const { mono, spans } = buildDspInput(channels, audio.sampleRate);
+  channels.length = 0;
+  const durationSec = audio.duration;
+  const sampleRate = audio.sampleRate;
+  const numberOfChannels = audio.numberOfChannels;
+  audio = null;
 
   const dsp = await runDspParallel(
     mono,
-    audio.sampleRate,
+    sampleRate,
     loud.clipFraction,
     onProgress,
     spans,
@@ -1242,7 +1262,7 @@ export async function analyzeFile(
     dspOptions,
   );
 
-  const containerKbps = audio.duration > 0 ? (file.size * 8) / audio.duration / 1000 : 0;
+  const containerKbps = durationSec > 0 ? (file.size * 8) / durationSec / 1000 : 0;
 
   onProgress?.("Done", 1);
 
@@ -1252,13 +1272,13 @@ export async function analyzeFile(
     fileSize: file.size,
     mimeType: file.type,
     objectUrl: URL.createObjectURL(file),
-    durationSec: audio.duration,
-    sampleRate: audio.sampleRate,
-    channels: audio.numberOfChannels,
+    durationSec,
+    sampleRate,
+    channels: numberOfChannels,
     container: {
       ...container,
-      sampleRate: container.sampleRate ?? audio.sampleRate,
-      channels: container.channels ?? audio.numberOfChannels,
+      sampleRate: container.sampleRate ?? sampleRate,
+      channels: container.channels ?? numberOfChannels,
     },
     containerKbps,
     cutoffHz: dsp.cutoffHz,
@@ -1269,7 +1289,8 @@ export async function analyzeFile(
     score: dsp.score,
     scoreParts: dsp.scoreParts,
     sourceLimited: dsp.sourceLimited,
-    liteAnalysis,
+    // Every file now takes the same bounded slice path with identical
+    // region choice, so nothing is "lite" any more.
     cacheKey: key,
     peakDb: loud.peakDb,
     rmsDb: loud.rmsDb,
