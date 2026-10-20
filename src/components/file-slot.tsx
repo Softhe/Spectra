@@ -46,6 +46,14 @@ function dragHasFiles(e: DragEvent): boolean {
 export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const dropRef = useRef<HTMLButtonElement>(null);
+  // Remove unmounts the focused X button; hand focus to the idle drop
+  // button instead of letting it fall to <body>.
+  const pendingFocus = useRef(false);
+  // An A/B switch starts the target muted (inside the user gesture, which
+  // iOS requires) and unmutes it once positioned. Exclusivity and the
+  // now-playing claim wait until it is audible, so the crossfade survives.
+  const claimPending = useRef(false);
   const [over, setOver] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [playError, setPlayError] = useState<string | null>(null);
@@ -61,6 +69,13 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
     setPosition(0);
     setMediaDuration(null);
   }, [readyId]);
+
+  useEffect(() => {
+    if (state.status === "idle" && pendingFocus.current) {
+      pendingFocus.current = false;
+      dropRef.current?.focus();
+    }
+  }, [state.status]);
 
   // Pause this preview when the other slot starts playing.
   useEffect(() => {
@@ -142,6 +157,8 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
     if (!el) return;
     setPlayError(null);
     if (el.paused) {
+      // Manual play is always audible (clears any switch-left mute).
+      el.muted = false;
       // State syncs via onPlay/onPause; a rejection (e.g. interrupted load)
       // surfaces as an error line instead of a stuck pause icon.
       el.play().catch(() => {
@@ -153,14 +170,30 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
     }
   }
 
-  function handlePlay() {
-    setPlaying(true);
-    // Claim exclusivity only once actually playing, so a failed play()
-    // never silences the other slot.
+  function claim() {
+    claimPending.current = false;
     window.dispatchEvent(new CustomEvent<SlotId>(PLAY_EVENT, { detail: id }));
   }
 
+  function handlePlay() {
+    setPlaying(true);
+    // Claim exclusivity only once actually playing (so a failed play()
+    // never silences the other slot) and audible (a muted A/B start claims
+    // on unmute, in handleVolumeChange).
+    if (audioRef.current?.muted) {
+      claimPending.current = true;
+      return;
+    }
+    claim();
+  }
+
+  function handleVolumeChange() {
+    const el = audioRef.current;
+    if (claimPending.current && el && !el.paused && !el.muted) claim();
+  }
+
   function handleStop() {
+    claimPending.current = false;
     setPlaying(false);
     window.dispatchEvent(new CustomEvent<SlotId>(STOP_EVENT, { detail: id }));
   }
@@ -213,19 +246,14 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
               {state.analysis.score.toFixed(0)}/100
             </span>
           )}
-          {state.status === "ready" && state.analysis.liteAnalysis && (
-            <span
-              className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-[11px] text-warn"
-              title="Very long file: analyzed from its loudest excerpts to stay within memory limits"
-            >
-              Lite
-            </span>
-          )}
           {state.status !== "idle" && (
             <button
               type="button"
-              onClick={onClear}
-              className="inline-flex size-9 items-center justify-center rounded-sm text-muted hover:bg-bg-subtle hover:text-fg"
+              onClick={() => {
+                pendingFocus.current = true;
+                onClear();
+              }}
+              className="inline-flex size-9 items-center justify-center rounded-sm text-muted pointer-coarse:size-11 hover:bg-bg-subtle hover:text-fg"
               aria-label={`Remove ${label}`}
             >
               <X className="size-4" />
@@ -236,6 +264,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
 
       {state.status === "idle" && (
         <button
+          ref={dropRef}
           type="button"
           onClick={() => inputRef.current?.click()}
           className={cn(
@@ -280,7 +309,12 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
           <p role="alert" className="text-sm text-loss">
             {state.message}
           </p>
-          <Button variant="outline" size="sm" onClick={() => inputRef.current?.click()}>
+          <Button
+            variant="outline"
+            size="sm"
+            className="pointer-coarse:h-11"
+            onClick={() => inputRef.current?.click()}
+          >
             Try another file
           </Button>
         </div>
@@ -305,7 +339,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
               onClick={togglePlay}
               aria-label={playing ? `Pause ${label} preview` : `Play ${label} preview`}
               aria-pressed={playing}
-              className={cn("shrink-0", playing && "ring-1 ring-win/60")}
+              className={cn("shrink-0 pointer-coarse:size-11", playing && "ring-1 ring-win/60")}
             >
               {playing ? <Pause className="size-4" /> : <Play className="size-4 ml-0.5" />}
             </Button>
@@ -317,6 +351,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
               onEnded={handleStop}
               onPause={handleStop}
               onPlay={handlePlay}
+              onVolumeChange={handleVolumeChange}
               onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
               onLoadedMetadata={(e) => {
                 const d = e.currentTarget.duration;
@@ -351,7 +386,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
             </p>
           )}
 
-          <SpectrogramCanvas analysis={state.analysis} />
+          <SpectrogramCanvas analysis={state.analysis} label={label} />
 
           <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
             <Stat label="Spectral ceiling" value={formatHz(state.analysis.cutoffHz)} emphasize />
@@ -384,6 +419,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
         type="file"
         accept={ACCEPT}
         className="sr-only"
+        // Opened by the visible drop button; keep it out of the tab order.
+        tabIndex={-1}
+        aria-hidden="true"
         onChange={(e) => {
           pick(e.target.files);
           e.target.value = "";
@@ -427,7 +465,7 @@ function SeekBar({
           setDragValue(null);
           if (v != null) onSeek(v);
         }}
-        className="relative flex h-6 flex-1 touch-none items-center disabled:pointer-events-none disabled:opacity-40"
+        className="relative flex h-6 flex-1 touch-none items-center pointer-coarse:h-11 disabled:pointer-events-none disabled:opacity-40"
       >
         <Slider.Track className="relative h-1 grow rounded-full bg-bg-subtle">
           <Slider.Range className="absolute h-full rounded-full bg-trace-a" />

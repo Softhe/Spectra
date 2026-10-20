@@ -1,5 +1,6 @@
 // DSP worker: runs the pure analysis core (runDsp) off the main thread.
-// Decode stays on main (AudioBuffer is not transferable); the mono mix is
+// Decode stays on main (AudioBuffer is not transferable); the compact mono
+// slice buffer (regions + excerpt only, see buildDspInput) is
 // structured-cloned in (not transferred, so the client keeps a usable copy
 // for its main-thread fallback), and the result's large buffers are
 // transferred back. Progress maps 1:1 onto the

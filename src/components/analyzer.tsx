@@ -23,6 +23,7 @@ import {
   QUALITY_LABEL,
   ROLLOFF_LABEL,
 } from "@/lib/audio/analyze";
+import { filesIdentical } from "@/lib/audio/cache";
 import { makeDemoFiles } from "@/lib/audio/demo";
 import {
   channelLabel,
@@ -76,6 +77,8 @@ export function Analyzer() {
   const [demoBusy, setDemoBusy] = useState(false);
   const gens = useRef({ a: 0, b: 0 });
   const urls = useRef({ a: null as string | null, b: null as string | null });
+  // Source file behind each ready analysis, for the exact identity check.
+  const fileOf = useRef(new WeakMap<Analysis, File>());
   const controllers = useRef({
     a: null as AbortController | null,
     b: null as AbortController | null,
@@ -139,6 +142,7 @@ export function Analyzer() {
           return;
         }
         urls.current[id] = analysis.objectUrl;
+        fileOf.current.set(analysis, file);
         setSlots((s) => ({ ...s, [id]: { status: "ready", analysis } }));
       } catch (err) {
         if (err instanceof CancelledError || gens.current[id] !== gen) return;
@@ -186,36 +190,60 @@ export function Analyzer() {
         void run("b", files[1]!);
         return;
       }
-      const target: SlotId =
-        slots.a.status === "idle" ? "a" : slots.b.status === "idle" ? "b" : "a";
+      // A slot that is empty or failed is free; never overwrite a good result
+      // while the other side is waiting for a retry.
+      const free = (s: SlotState) => s.status === "idle" || s.status === "error";
+      const target: SlotId = free(slots.a) ? "a" : free(slots.b) ? "b" : "a";
       void run(target, files[0]!);
     },
-    [run, slots.a.status, slots.b.status, showDropNotice],
+    [run, slots.a, slots.b, showDropNotice],
   );
 
   const a = analysisOf(slots.a);
   const b = analysisOf(slots.b);
   // Same bytes in both slots: a faux tie helps nobody — say so directly.
-  // Content-hash keys are primary; when neither hash could be computed
-  // (insecure context, no crypto.subtle), name+size is a conservative
-  // fallback so bit-identical drops still get the honest-tie panel.
-  const identical = Boolean(
-    (a?.cacheKey && b?.cacheKey && a.cacheKey === b.cacheKey) ||
-    (a &&
-      b &&
-      !a.cacheKey &&
-      !b.cacheKey &&
-      a.fileName === b.fileName &&
-      a.fileSize === b.fileSize),
-  );
+  // Content keys are only a fast pre-check: different sizes or different
+  // keys (keys depend on content alone) settle "different" synchronously,
+  // which is nearly every real comparison. Equal sizes with equal (or
+  // missing) keys are confirmed by an exact chunked byte compare, since a
+  // sampled key can collide. Until that resolves, `identical` is null and
+  // neither the verdict nor the identical panel renders — no flicker.
+  const quickDifferent =
+    !a ||
+    !b ||
+    a.fileSize !== b.fileSize ||
+    Boolean(a.cacheKey && b.cacheKey && a.cacheKey !== b.cacheKey);
+  const [identity, setIdentity] = useState<{
+    a: Analysis;
+    b: Analysis;
+    same: boolean;
+  } | null>(null);
+  useEffect(() => {
+    if (quickDifferent || !a || !b) return;
+    const fa = fileOf.current.get(a);
+    const fb = fileOf.current.get(b);
+    const ctrl = new AbortController();
+    void (fa && fb ? filesIdentical(fa, fb, ctrl.signal) : Promise.resolve(false)).then((same) => {
+      if (!ctrl.signal.aborted) setIdentity({ a, b, same });
+    });
+    return () => ctrl.abort();
+  }, [a, b, quickDifferent]);
+  const identical: boolean | null = quickDifferent
+    ? false
+    : identity && identity.a === a && identity.b === b
+      ? identity.same
+      : null;
   const comparison: Comparison | null = useMemo(
-    () => (a && b && !identical ? compareAnalyses(a, b) : null),
+    () => (a && b && identical === false ? compareAnalyses(a, b) : null),
     [a, b, identical],
   );
 
   // A/B compare: which slot the verdict button started (null = manual play).
   const [abPlaying, setAbPlaying] = useState<SlotId | null>(null);
   const abArmed = useRef(false);
+  // Switch generation: a stale seek/play from an outpaced switch must never
+  // disturb the newest one (otherwise two exclusivity pauses silence both).
+  const switchSeq = useRef(0);
   // Non-zero while an abSwitch is between its start and the target's play
   // event (crossfade + seek). Pauses during that window are the switch's own
   // doing and must not end the A/B session.
@@ -236,6 +264,12 @@ export function Analyzer() {
     }
   });
   const matchRef = useRef<{ a: number; b: number }>({ a: 1, b: 1 });
+  // Live global level for async callbacks (fade completion) — the closure's
+  // `volume` would be stale if the slider moved mid-fade.
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
+  // Which switch currently owns an element's A/B start mute (0 = none).
+  const mutedBy = useRef({ a: 0, b: 0 });
 
   const applyVolumes = useCallback(() => {
     const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
@@ -252,7 +286,18 @@ export function Analyzer() {
   // (otherwise a freshly loaded slot can stay attenuated by the old ratio).
   useEffect(() => {
     setAbPlaying(null);
+    // Orphan any in-flight switch: its delayed play() must not start an
+    // element that was just cleared or replaced.
+    switchSeq.current++;
+    abArmed.current = false;
     switchPending.current = 0;
+    // An orphaned switch may have left a surviving element playing muted
+    // (its unmute is now stale): release every A/B mute so nothing is
+    // stuck silent.
+    mutedBy.current = { a: 0, b: 0 };
+    document.querySelectorAll<HTMLAudioElement>("audio[data-slot]").forEach((el) => {
+      if (el.muted) el.muted = false;
+    });
     matchRef.current = { a: 1, b: 1 };
     abAnalyses.current = a && b ? { a, b } : null;
   }, [a, b]);
@@ -331,7 +376,10 @@ export function Analyzer() {
             els.find((el) => el.dataset.slot === lastPlayedRef.current) ??
             els.find((el) => el.paused) ??
             els[0];
-          if (target) void target.play().catch(() => undefined);
+          if (target) {
+            target.muted = false;
+            void target.play().catch(() => undefined);
+          }
         });
         ms.setActionHandler("pause", () => {
           for (const el of audios()) el.pause();
@@ -363,10 +411,13 @@ export function Analyzer() {
   // only the newest fade on an element may pause it.
   const fadeSeq = useRef({ a: 0, b: 0 });
 
-  const fadeOutThenPause = useCallback((el: HTMLAudioElement, id: SlotId, holdVolume: number) => {
+  const fadeOutThenPause = useCallback((el: HTMLAudioElement, id: SlotId) => {
     const seq = ++fadeSeq.current[id];
     const ms = 70;
     const t0 = performance.now();
+    // Read the level live: the volume slider (or a newer switch's loudness
+    // match) may move during the fade or the 600 ms backstop.
+    const level = () => Math.min(1, Math.max(0, volumeRef.current * (matchRef.current[id] ?? 1)));
     const finish = () => {
       if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
       // Terminal: consume the seq so the backstop timeout below can tell a
@@ -375,7 +426,14 @@ export function Analyzer() {
       fadeSeq.current[id]++;
       el.pause();
       try {
-        el.volume = holdVolume;
+        el.volume = level();
+        // A superseded switch may have started this element muted. No newer
+        // switch targeted it since (that would have bumped fadeSeq), so the
+        // mute is orphaned: release it, or the next play would be silent.
+        if (el.muted) {
+          mutedBy.current[id] = 0;
+          el.muted = false;
+        }
       } catch {
         // Already removed.
       }
@@ -384,7 +442,7 @@ export function Analyzer() {
       if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
       const k = 1 - Math.min(1, (performance.now() - t0) / ms);
       try {
-        el.volume = Math.max(0, holdVolume * k);
+        el.volume = Math.max(0, level() * k);
       } catch {
         // Element gone mid-fade: nothing to pause.
         return;
@@ -408,10 +466,6 @@ export function Analyzer() {
     }, 600);
   }, []);
 
-  // Switch generation: a stale seek/play from an outpaced switch must never
-  // disturb the newest one (otherwise two exclusivity pauses silence both).
-  const switchSeq = useRef(0);
-
   const abSwitch = useCallback(
     (target: SlotId) => {
       const pair = abAnalyses.current;
@@ -426,8 +480,14 @@ export function Analyzer() {
         return;
       }
       // Continue where the other preview left off. The seek is issued below
-      // (once, after the crossfade starts) so decode stalls stay silent.
-      const otherTime = otherEl && !otherEl.paused ? otherEl.currentTime : null;
+      // (once, after the crossfade starts, muted during a crossfade) so
+      // decode stalls stay silent.
+      // A paused session resumes from the copy heard last, not from the
+      // target's own stale position.
+      const otherTime =
+        otherEl && (!otherEl.paused || otherEl.dataset.slot === lastPlayedRef.current)
+          ? otherEl.currentTime
+          : null;
       const t = otherTime ?? targetEl.currentTime;
       // Loudness match on RMS so the switch compares quality, not volume.
       // Stored as ratios against the global volume (which never moves here),
@@ -451,64 +511,95 @@ export function Analyzer() {
       fadeSeq.current[target]++;
       targetEl.volume = targetVolume;
 
-      const startTarget = () => {
-        if (switchSeq.current !== mySwitch) return;
-        if (!targetEl.paused) {
-          // Already playing (manual preview, or still fading out from a
-          // switch this one supersedes): play() would fire no event, leaving
-          // the switch armed/pending forever. Adopt it directly. Its fade was
-          // cancelled above; restore the level a partial fade left behind.
-          fadeSeq.current[target]++;
-          try {
-            targetEl.volume = targetVolume;
-          } catch {
-            // Element gone: nothing to restore.
-          }
-          abArmed.current = false;
-          switchPending.current = 0;
-          setAbPlaying(target);
-          return;
+      const otherId: SlotId = target === "a" ? "b" : "a";
+      const crossfade = Boolean(otherEl && !otherEl.paused);
+      if (otherEl) {
+        otherEl.volume = otherVolume;
+        if (crossfade) fadeOutThenPause(otherEl, otherId);
+        else otherEl.pause();
+      }
+
+      const hasDuration = Number.isFinite(targetEl.duration) && targetEl.duration > 0;
+      const seekTo = hasDuration
+        ? Math.max(0, Math.min(t, Math.max(0, targetEl.duration - 0.1)))
+        : null;
+      const needsSeek = seekTo != null && Math.abs(targetEl.currentTime - seekTo) >= 0.05;
+
+      // Let the target be heard once positioned. Unmuting fires
+      // volumechange; FileSlot then makes its deferred now-playing claim,
+      // whose handler (onPlay above) sees abArmed and completes the switch.
+      const makeAudible = () => {
+        if (switchSeq.current !== mySwitch || !targetEl.isConnected) return;
+        if (mutedBy.current[target] !== mySwitch) return;
+        mutedBy.current[target] = 0;
+        try {
+          targetEl.volume = targetVolume;
+          targetEl.muted = false;
+        } catch {
+          // Element gone.
         }
-        abArmed.current = true;
-        targetEl.play().catch(() => {
-          if (switchSeq.current !== mySwitch) return;
-          abArmed.current = false;
-          switchPending.current = 0;
-          setAbPlaying(null);
-        });
+      };
+      const whenPositioned = (then: () => void) => {
+        let done = false;
+        const go = () => {
+          if (done) return;
+          done = true;
+          targetEl.removeEventListener("seeked", go);
+          then();
+        };
+        targetEl.addEventListener("seeked", go);
+        // Never hang on a missing event: bound the wait.
+        window.setTimeout(go, 400);
       };
 
-      if (otherEl && !otherEl.paused) {
-        // Crossfade: the old side fades out while the new side seeks (its
-        // decode stall happens silently) and starts only once positioned.
-        otherEl.volume = otherVolume;
-        fadeOutThenPause(otherEl, otherEl.dataset.slot === "a" ? "a" : "b", otherVolume);
-        const hasDuration = Number.isFinite(targetEl.duration) && targetEl.duration > 0;
-        const seekTo = hasDuration
-          ? Math.max(0, Math.min(t, Math.max(0, targetEl.duration - 0.1)))
-          : null;
-        if (seekTo == null || Math.abs(targetEl.currentTime - seekTo) < 0.05) {
-          startTarget();
-        } else {
-          targetEl.currentTime = seekTo;
-          let done = false;
-          const go = () => {
-            if (done) return;
-            done = true;
-            targetEl.removeEventListener("seeked", go);
-            startTarget();
-          };
-          targetEl.addEventListener("seeked", go);
-          // Never hang on a missing event: bound the wait.
-          window.setTimeout(go, 400);
-        }
-      } else {
-        if (otherEl) {
-          otherEl.volume = otherVolume;
-          otherEl.pause();
-        }
-        startTarget();
+      if (!targetEl.paused && !targetEl.muted) {
+        // Already audibly playing (manual preview, or still fading out from
+        // a switch this one supersedes): play() would fire no event, leaving
+        // the switch armed/pending forever. Adopt it directly. Its fade was
+        // cancelled above; restore the level a partial fade left behind.
+        if (needsSeek) targetEl.currentTime = seekTo;
+        abArmed.current = false;
+        switchPending.current = 0;
+        setAbPlaying(target);
+        return;
       }
+
+      if (!targetEl.paused) {
+        // Playing but muted: a superseded switch started it and its unmute
+        // is now stale. Take over that mute; its now-playing claim is still
+        // deferred, so stay armed and let the claim finish this switch.
+        mutedBy.current[target] = mySwitch;
+        abArmed.current = true;
+        if (needsSeek) {
+          targetEl.currentTime = seekTo;
+          whenPositioned(makeAudible);
+        } else {
+          makeAudible();
+        }
+        return;
+      }
+
+      // Paused target: play() runs NOW, synchronously inside the user
+      // gesture — WebKit (iOS Safari) refuses an element's first play()
+      // from a later 'seeked' listener or timeout. During a crossfade it
+      // starts muted so the seek's decode stall is silent and the old side
+      // keeps its fade (FileSlot defers exclusivity until audible).
+      const muteStart = crossfade && needsSeek;
+      mutedBy.current[target] = muteStart ? mySwitch : 0;
+      targetEl.muted = muteStart;
+      if (needsSeek) targetEl.currentTime = seekTo;
+      abArmed.current = true;
+      targetEl.play().catch(() => {
+        if (mutedBy.current[target] === mySwitch) {
+          mutedBy.current[target] = 0;
+          targetEl.muted = false;
+        }
+        if (switchSeq.current !== mySwitch) return;
+        abArmed.current = false;
+        switchPending.current = 0;
+        setAbPlaying(null);
+      });
+      if (muteStart) whenPositioned(makeAudible);
     },
     [volume, fadeOutThenPause],
   );
@@ -524,9 +615,10 @@ export function Analyzer() {
   // modifier chords, which belong to the browser.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+      // composedPath sees through shadow roots (e.target is retargeted).
+      const t = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)) return;
       const key = e.key.toLowerCase();
       if (key !== "a" && key !== "b") return;
       if (!(a && b)) return;
@@ -592,18 +684,21 @@ export function Analyzer() {
           </div>
         </header>
 
-        {dropNotice && (
-          <p
-            role="status"
-            aria-live="polite"
-            className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-warn shadow-[var(--shadow-border)]"
-          >
-            {dropNotice}
-          </p>
-        )}
+        {/* Always-mounted live regions: a region inserted together with its
+            text is usually not announced. */}
+        <p role="status" aria-live="polite" className="sr-only">
+          {identical && a && b ? "Identical files, no comparison" : (comparison?.headline ?? "")}
+        </p>
+        <div role="status" aria-live="polite">
+          {dropNotice && (
+            <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-warn shadow-[var(--shadow-border)]">
+              {dropNotice}
+            </p>
+          )}
+        </div>
 
         {identical && a && b ? (
-          <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
+          <aside className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
             <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
               <Info className="size-3.5 text-info" />
               Identical files · no comparison
@@ -651,7 +746,9 @@ export function Analyzer() {
 
         <SpectrumPlot a={a} b={b} winnerId={comparison?.winner ?? null} />
 
-        {a && b && <CompareTable a={a} b={b} winner={comparison?.winner ?? "tie"} />}
+        {a && b && identical !== null && (
+          <CompareTable a={a} b={b} winner={comparison?.winner ?? "tie"} />
+        )}
 
         <HowTo />
       </div>
@@ -684,7 +781,7 @@ function Verdict({
   const next = abPlaying === "a" ? "b" : "a";
 
   return (
-    <aside aria-live="polite" className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
+    <aside className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
       <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
         {decided && <Trophy className="size-3.5 text-win" />}
         {decided
@@ -778,14 +875,16 @@ function CopyReport({ comparison, a, b }: { comparison: Comparison; a: Analysis;
       ta.style.opacity = "0";
       document.body.appendChild(ta);
       ta.select();
+      let ok = false;
       try {
-        document.execCommand("copy");
+        // Returns false (rather than throwing) when the copy was refused.
+        ok = document.execCommand("copy");
       } catch {
-        // Give up silently; the button just won't confirm.
-        document.body.removeChild(ta);
-        return;
+        ok = false;
       }
       document.body.removeChild(ta);
+      // Give up silently; the button just won't confirm.
+      if (!ok) return;
     }
     setCopied(true);
     window.clearTimeout(timer.current);
@@ -796,6 +895,7 @@ function CopyReport({ comparison, a, b }: { comparison: Comparison; a: Analysis;
     <Button
       variant="outline"
       size="sm"
+      className="pointer-coarse:h-11"
       onClick={() => void copy()}
       aria-label="Copy comparison report to clipboard"
     >
@@ -824,7 +924,7 @@ function VolumeControl({
       <button
         type="button"
         onClick={() => onVolumeChange(volume === 0 ? lastAudible.current : 0)}
-        className="inline-flex size-9 items-center justify-center rounded-sm text-muted hover:bg-bg-subtle hover:text-fg"
+        className="inline-flex size-9 items-center justify-center rounded-sm text-muted hover:bg-bg-subtle hover:text-fg pointer-coarse:size-11"
         aria-label={volume === 0 ? "Unmute previews" : "Mute previews"}
       >
         <Icon className="size-4" />
@@ -834,7 +934,7 @@ function VolumeControl({
         max={1}
         step={0.01}
         onValueChange={([v]) => onVolumeChange(v ?? 1)}
-        className="relative flex h-9 w-32 touch-none items-center sm:w-40"
+        className="relative flex h-9 w-32 touch-none items-center sm:w-40 pointer-coarse:h-11"
         aria-label="Preview volume"
       >
         <Slider.Track className="relative h-1 grow rounded-full bg-bg-subtle">

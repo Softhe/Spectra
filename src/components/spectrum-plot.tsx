@@ -40,6 +40,29 @@ function drawTrace(
   ctx.stroke();
 }
 
+/**
+ * Calls `onChange` whenever devicePixelRatio changes (window dragged to a
+ * monitor with a different scale, browser zoom). A resolution media query
+ * only fires once, so it re-subscribes at the new ratio each time.
+ */
+function watchDpr(onChange: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+  let mql: MediaQueryList | null = null;
+  const handler = () => {
+    subscribe();
+    onChange();
+  };
+  const subscribe = () => {
+    mql?.removeEventListener("change", handler);
+    mql = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    mql.addEventListener("change", handler);
+  };
+  subscribe();
+  return () => mql?.removeEventListener("change", handler);
+}
+
 export function SpectrumPlot({ a, b, winnerId, className }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -115,9 +138,14 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       raf = requestAnimationFrame(paint);
     });
     ro.observe(wrap);
+    const unwatchDpr = watchDpr(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(paint);
+    });
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      unwatchDpr();
     };
   }, [a, b, winnerId]);
 
@@ -125,11 +153,7 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
 
   // Same axis width the canvas paints (paint() clamps at 22050): labels must
   // sit at the true frequency positions, not at fixed thirds of the box.
-  const maxHzLabel = Math.max(
-    a?.spectrogram.maxHz ?? 0,
-    b?.spectrogram.maxHz ?? 0,
-    22050,
-  );
+  const maxHzLabel = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
 
   return (
     <div className={cn("rounded-lg bg-bg-elevated p-4 sm:p-5", className)}>
@@ -144,13 +168,15 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
           {a && (
             <span className="flex items-center gap-1.5 text-trace-a">
               {winnerId === "a" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block size-2 rounded-full bg-trace-a" />A · {formatHz(a.cutoffHz)}
+              <span className="inline-block size-2 rounded-full bg-trace-a" />A ·{" "}
+              {formatHz(a.cutoffHz)}
             </span>
           )}
           {b && (
             <span className="flex items-center gap-1.5 text-trace-b">
               {winnerId === "b" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block size-2 rounded-full bg-trace-b" />B · {formatHz(b.cutoffHz)}
+              <span className="inline-block size-2 rounded-full bg-trace-b" />B ·{" "}
+              {formatHz(b.cutoffHz)}
             </span>
           )}
         </div>
@@ -172,15 +198,17 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
           gridlines drawn above. */}
       <div className="relative mt-1 h-4 font-mono text-[11px] text-faint">
         <span className="absolute left-0">0</span>
-        {[10, 20].filter((k) => k * 1000 < maxHzLabel).map((k) => (
-          <span
-            key={k}
-            className="absolute -translate-x-1/2"
-            style={{ left: `${((k * 1000) / maxHzLabel) * 100}%` }}
-          >
-            {k} kHz
-          </span>
-        ))}
+        {[10, 20]
+          .filter((k) => k * 1000 < maxHzLabel)
+          .map((k) => (
+            <span
+              key={k}
+              className="absolute -translate-x-1/2"
+              style={{ left: `${((k * 1000) / maxHzLabel) * 100}%` }}
+            >
+              {k} kHz
+            </span>
+          ))}
       </div>
     </div>
   );

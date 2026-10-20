@@ -10,7 +10,9 @@ export const STOP_EVENT = "spectra:stopped";
 // are tested independently: a bad MIME must not hide a known extension.
 // Both are anchored: substring matching let "audio-notes.txt" through and
 // still missed "song.mp3" (no "mp3" in the old alternation).
-const AUDIO_MIME_RE = /^(audio\/|video\/(mp4|webm|ogg|x-matroska)$|application\/ogg$)/i;
+// Playlists (.m3u/.pls) and MIDI carry audio/* types but no decodable audio.
+const AUDIO_MIME_RE =
+  /^(audio\/(?!(x-)?mpegurl$|x-scpls$|(x-)?midi$)|video\/(mp4|webm|ogg|x-matroska)$|application\/ogg$)/i;
 const AUDIO_EXT_RE =
   /\.(mp3|m4a|m4b|aac|mp4|wav|wave|flac|ogg|oga|opus|aif|aiff|aifc|caf|webm|mka)$/i;
 

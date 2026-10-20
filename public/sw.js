@@ -17,7 +17,8 @@
  *    never evicted.
  * Bump CACHE when the shell contract changes.
  */
-const CACHE = "spectra-shell-v2";
+const CACHE_PREFIX = "spectra-shell-";
+const CACHE = `${CACHE_PREFIX}v2`;
 const MAX_ENTRIES = 80;
 
 async function trimCache() {
@@ -85,7 +86,11 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+      // Only retire our own older shells; other caches on this origin
+      // (platform PWA layer) are not ours to delete.
+      await Promise.all(
+        keys.filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE).map((k) => caches.delete(k)),
+      );
       await trimCache().catch(() => undefined);
       await self.clients.claim();
     })(),
@@ -95,6 +100,8 @@ self.addEventListener("activate", (event) => {
 function isCacheable(url) {
   if (!url.origin || url.origin !== self.location.origin) return false;
   if (url.pathname.startsWith("/__grok/")) return false;
+  // Dynamic endpoints must never be served cache-first.
+  if (/^\/(api|auth|_serverFn)(\/|$)/.test(url.pathname)) return false;
   return true;
 }
 

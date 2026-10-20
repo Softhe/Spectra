@@ -5,9 +5,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import {
+  buildDspInput,
   classifyQuality,
   compareAnalyses,
   decodeErrorMessage,
+  pickRegions,
   runDsp,
   scoreOf,
 } from "./analyze.ts";
@@ -53,7 +55,6 @@ function mkAnalysis(o: {
     score: o.score ?? 90,
     scoreParts: { ceiling: 62, rolloff: 12, air: 14, clarity: 12, clip: 0 },
     sourceLimited: o.limited ?? false,
-    liteAnalysis: false,
     cacheKey: null,
     peakDb: 0,
     rmsDb: -9,
@@ -287,6 +288,99 @@ describe("runDsp lite spans", () => {
     });
     assert.equal(res.spectrogram.excerptStartSec, 384);
     assert.equal(res.spectrogram.durationSec, 12);
+  });
+});
+
+describe("buildDspInput slice path", () => {
+  // Deterministic stereo "music": decorrelated L/R noise plus tones, with an
+  // amplitude envelope (quiet intro, loud body, silent tail) so loudness
+  // ranking has real choices to make.
+  function stereo(sr: number, sec: number, silentTailSec = 0): Float32Array[] {
+    const n = Math.floor(sr * sec);
+    const L = new Float32Array(n);
+    const R = new Float32Array(n);
+    let seed = 3;
+    const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296 - 0.5;
+    const tail = n - Math.floor(silentTailSec * sr);
+    for (let i = 0; i < tail; i++) {
+      const t = i / sr;
+      const env = 0.15 + 0.6 * Math.abs(Math.sin(t * 0.37));
+      const tone = Math.sin(2 * Math.PI * 440 * t) * 0.2;
+      L[i] = env * (rnd() * 0.5 + tone);
+      R[i] = env * (rnd() * 0.5 - tone * 0.5);
+    }
+    return [L, R];
+  }
+  const mixFull = (chs: Float32Array[]): Float32Array => {
+    const out = new Float32Array(chs[0]!.length);
+    const scale = 1 / chs.length;
+    for (let i = 0; i < out.length; i++) {
+      let v = 0;
+      for (const c of chs) v += c[i]!;
+      out[i] = v * scale;
+    }
+    return out;
+  };
+  const same = (a: Awaited<ReturnType<typeof runDsp>>, b: Awaited<ReturnType<typeof runDsp>>) => {
+    assert.deepEqual(
+      [a.cutoffHz, a.rolloff, a.brickwallHz, a.qualityClass, a.score, a.sourceLimited],
+      [b.cutoffHz, b.rolloff, b.brickwallHz, b.qualityClass, b.score, b.sourceLimited],
+    );
+    assert.equal(a.hfOccupancy, b.hfOccupancy);
+    assert.deepEqual(a.meanDb, b.meanDb);
+    assert.deepEqual(a.spectrogram, b.spectrogram);
+  };
+
+  for (const [sr, sec] of [
+    [44100, 6],
+    [44100, 15],
+    [48000, 75],
+    [8000, 600],
+  ] as const) {
+    it(`matches the full-mono path exactly (${sec} s @ ${sr} Hz)`, async () => {
+      const chs = stereo(sr, sec);
+      const full = await runDsp(mixFull(chs), sr, 0);
+      const { mono, spans } = buildDspInput(chs, sr);
+      same(await runDsp(mono, sr, 0, undefined, spans), full);
+    });
+  }
+
+  it("matches for mono sources too", async () => {
+    const chs = [stereo(44100, 30)[0]!];
+    const full = await runDsp(chs[0]!, 44100, 0);
+    const { mono, spans } = buildDspInput(chs, 44100);
+    same(await runDsp(mono, 44100, 0, undefined, spans), full);
+  });
+
+  it("bounds the worker buffer by samples read, not file length", () => {
+    // 10 minutes: the compact buffer holds at most 4 × 4 s + 12 s of mono.
+    const sr = 8000;
+    const { mono, spans } = buildDspInput(stereo(sr, 600), sr);
+    assert.ok(mono.length <= 28 * sr, `mono ${mono.length / sr} s`);
+    assert.equal(spans.regions.length, 4);
+    assert.equal(spans.excerptStartSec, 0.32 * 600);
+    assert.equal(spans.excerptDurSec, 12);
+  });
+
+  it("keeps a ≤8 s file whole, stored once", () => {
+    const sr = 44100;
+    const chs = stereo(sr, 6);
+    const { mono, spans } = buildDspInput(chs, sr);
+    assert.equal(mono.length, chs[0]!.length);
+    assert.deepEqual(spans.regions, [{ start: 0, end: mono.length }]);
+    assert.deepEqual(spans.excerpt, { start: 0, end: mono.length });
+  });
+
+  it("ranks 8–20 s clips by loudness so regions skip a silent tail", () => {
+    // 15 s clip whose last 6 s are digital silence: the old fixed 75%
+    // window (11.25 s) sat entirely in silence.
+    const sr = 44100;
+    const mono = mixFull(stereo(sr, 15, 6));
+    const regions = pickRegions(mono, sr);
+    assert.equal(regions.length, 3);
+    for (const r of regions) {
+      assert.ok(r.start < 9 * sr, `region at ${r.start / sr} s starts in the silent tail`);
+    }
   });
 });
 
@@ -698,5 +792,57 @@ describe("decodeErrorMessage", () => {
   it("falls back to the generic format list", () => {
     const m = decodeErrorMessage("song.m4a", "AAC");
     assert.equal(m, "Could not decode “song.m4a”. Try MP3, M4A, AAC, WAV, FLAC, or OGG.");
+  });
+});
+
+describe("runDsp edge cases", () => {
+  // Band-limited deterministic noise: flat-ish up to `topHz`, nothing above.
+  function lowpassNoise(sr: number, topHz: number, n: number, amp = 0.5): Float32Array {
+    const re = new Float32Array(n);
+    const im = new Float32Array(n);
+    let seed = 11;
+    const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+    for (let k = 1; k < n / 2; k++) {
+      const f = (k * sr) / n;
+      if (f < 40 || f > topHz) continue;
+      const mag = Math.pow(f / 1000, -0.8);
+      const ph = rnd() * 2 * Math.PI;
+      re[k] = mag * Math.cos(ph);
+      im[k] = mag * Math.sin(ph);
+      re[n - k] = re[k]!;
+      im[n - k] = -im[k]!;
+    }
+    fft(re, im, true);
+    let peak = 0;
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(re[i]!));
+    for (let i = 0; i < n; i++) re[i] = (re[i]! / peak) * amp;
+    return re;
+  }
+
+  it("does not grade a low sample-rate file 'high' by default", async () => {
+    const r = await runDsp(lowpassNoise(8000, 3990, 1 << 17), 8000, 0);
+    assert.equal(r.sourceLimited, false);
+    assert.notEqual(r.qualityClass, "high");
+  });
+
+  it("does not read silence-padded lossy audio as full-band", async () => {
+    // 3 s of 16 kHz-limited noise inside 15 s of digital silence.
+    const sr = 44100;
+    const mono = new Float32Array(15 * sr);
+    mono.set(lowpassNoise(sr, 16000, 1 << 17), 6 * sr);
+    const r = await runDsp(mono, sr, 0);
+    assert.notEqual(r.qualityClass, "lossless");
+    assert.ok(r.cutoffHz < 17500, `cutoff ${r.cutoffHz}`);
+  });
+});
+
+describe("compareAnalyses tie confidence", () => {
+  it("never reports a tie with more than low confidence", () => {
+    const c = compareAnalyses(
+      mkAnalysis({ id: "A", cutoff: 20000, score: 70 }),
+      mkAnalysis({ id: "B", cutoff: 19000, score: 76 }),
+    );
+    assert.equal(c.winner, "tie");
+    assert.equal(c.confidence, "low");
   });
 });

@@ -33,5 +33,8 @@ describe("isAudioFile", () => {
     }
     assert.equal(isAudioFile({ name: "notes", type: "text/plain" }), false);
     assert.equal(isAudioFile({ name: "clip", type: "video/quicktime" }), false);
+    for (const type of ["audio/x-mpegurl", "audio/mpegurl", "audio/x-scpls", "audio/midi"]) {
+      assert.equal(isAudioFile({ name: "list", type }), false, type);
+    }
   });
 });
