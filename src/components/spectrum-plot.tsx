@@ -64,7 +64,16 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
 
       const maxHz = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
       const dbMin = -90;
-      const dbMax = -10;
+      // Loud low end must not flat-line against the top edge: lift the
+      // ceiling to the next 10 dB above the hottest *drawn* bin (never below
+      // -10). meanDb runs to Nyquist, past the plotted range on hi-res files.
+      let peak = -Infinity;
+      for (const x of [a, b]) {
+        if (!x) continue;
+        const last = Math.min(x.meanDb.length - 1, Math.floor(maxHz / x.meanDbHzPerBin));
+        for (let k = 1; k <= last; k++) peak = Math.max(peak, x.meanDb[k]!);
+      }
+      const dbMax = Math.max(-10, Math.ceil((peak + 2) / 10) * 10);
 
       ctx.strokeStyle = "rgba(232,234,238,0.08)";
       ctx.lineWidth = 1;
@@ -87,8 +96,20 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       const colA = style.getPropertyValue("--color-trace-a").trim() || "#8fbfb4";
       const colB = style.getPropertyValue("--color-trace-b").trim() || "#c4b49a";
 
-      if (a) drawTrace(ctx, a.meanDb, a.meanDbHzPerBin, colA, w, h, maxHz, dbMin, dbMax);
-      if (b) drawTrace(ctx, b.meanDb, b.meanDbHzPerBin, colB, w, h, maxHz, dbMin, dbMax);
+      // Below the ceilings the traces overlap almost exactly; the winner
+      // paints last so it is never hidden, over a slightly faded loser.
+      // Without a winner (tie / identical) neither trace is faded.
+      const traces = [
+        a && { x: a, col: colA, id: "a" as const },
+        b && { x: b, col: colB, id: "b" as const },
+      ].filter((t) => !!t);
+      const decided = winnerId === "a" || winnerId === "b";
+      if (winnerId === "a") traces.reverse();
+      traces.forEach((t, i) => {
+        ctx.globalAlpha = decided && i < traces.length - 1 ? 0.75 : 1;
+        drawTrace(ctx, t.x.meanDb, t.x.meanDbHzPerBin, t.col, w, h, maxHz, dbMin, dbMax);
+      });
+      ctx.globalAlpha = 1;
 
       const mark = (hz: number, color: string) => {
         const x = (hz / maxHz) * w;
@@ -125,14 +146,10 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
 
   // Same axis width the canvas paints (paint() clamps at 22050): labels must
   // sit at the true frequency positions, not at fixed thirds of the box.
-  const maxHzLabel = Math.max(
-    a?.spectrogram.maxHz ?? 0,
-    b?.spectrogram.maxHz ?? 0,
-    22050,
-  );
+  const maxHzLabel = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
 
   return (
-    <div className={cn("rounded-lg bg-bg-elevated p-4 sm:p-5", className)}>
+    <div className={cn("rounded-xl bg-bg-elevated p-4 sm:p-5", className)}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-sm font-medium text-fg">Average spectrum</h2>
@@ -144,13 +161,15 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
           {a && (
             <span className="flex items-center gap-1.5 text-trace-a">
               {winnerId === "a" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block size-2 rounded-full bg-trace-a" />A · {formatHz(a.cutoffHz)}
+              <span className="inline-block size-2 rounded-full bg-trace-a" />A ·{" "}
+              {formatHz(a.cutoffHz)}
             </span>
           )}
           {b && (
             <span className="flex items-center gap-1.5 text-trace-b">
               {winnerId === "b" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block size-2 rounded-full bg-trace-b" />B · {formatHz(b.cutoffHz)}
+              <span className="inline-block size-2 rounded-full bg-trace-b" />B ·{" "}
+              {formatHz(b.cutoffHz)}
             </span>
           )}
         </div>
@@ -172,15 +191,17 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
           gridlines drawn above. */}
       <div className="relative mt-1 h-4 font-mono text-[11px] text-faint">
         <span className="absolute left-0">0</span>
-        {[10, 20].filter((k) => k * 1000 < maxHzLabel).map((k) => (
-          <span
-            key={k}
-            className="absolute -translate-x-1/2"
-            style={{ left: `${((k * 1000) / maxHzLabel) * 100}%` }}
-          >
-            {k} kHz
-          </span>
-        ))}
+        {[10, 20]
+          .filter((k) => k * 1000 < maxHzLabel)
+          .map((k) => (
+            <span
+              key={k}
+              className="absolute -translate-x-1/2 whitespace-nowrap"
+              style={{ left: `${((k * 1000) / maxHzLabel) * 100}%` }}
+            >
+              {k} kHz
+            </span>
+          ))}
       </div>
     </div>
   );

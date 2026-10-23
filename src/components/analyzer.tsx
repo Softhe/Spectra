@@ -883,7 +883,7 @@ function ScoreBar({
   ] as const;
   const tone = highlighted ? "win" : "muted";
   return (
-    <div className={cn(dimmed && "opacity-60")}>
+    <div>
       <div className="flex items-baseline justify-between gap-2">
         <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted">
           {highlighted && <Trophy className="size-3 text-win" />}
@@ -903,7 +903,10 @@ function ScoreBar({
         </span>
       </div>
       <div
-        className="mt-1.5 flex h-1.5 gap-px overflow-hidden rounded-full bg-bg-subtle"
+        className={cn(
+          "mt-1.5 flex h-1.5 gap-px overflow-hidden rounded-full bg-bg-subtle",
+          dimmed && "opacity-60",
+        )}
         role="img"
         aria-label={`${label} quality score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, air ${parts.air.toFixed(0)}, clarity ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
       >
