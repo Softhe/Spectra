@@ -355,7 +355,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
 
           <SpectrogramCanvas analysis={state.analysis} />
 
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+          <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[360px]:grid-cols-2">
             <Stat label="Spectral ceiling" value={formatHz(state.analysis.cutoffHz)} emphasize />
             <Stat label="True class" value={QUALITY_LABEL[state.analysis.qualityClass]} />
             <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
