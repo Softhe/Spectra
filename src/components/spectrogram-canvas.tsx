@@ -235,7 +235,9 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
           </span>
         </div>
         {hover != null && (
-          <div className="mt-1 font-mono text-[11px] text-fg tabular-nums">{formatHz(hover)}</div>
+          <div className="mt-1 text-right font-mono text-[11px] whitespace-nowrap text-fg tabular-nums">
+            {formatHz(hover).replace(" kHz", "k")}
+          </div>
         )}
       </div>
     </div>
