@@ -32,7 +32,7 @@
   --color-bg-inset: #0c0d10;
   --color-fg: #e8eaee;
   --color-muted: #8b909a;
-  --color-faint: #5c616b;
+  --color-faint: #7b808a; /* ≥4.5:1 on bg / bg-elevated (WCAG AA) */
   --color-border: #23262e;
   --color-border-strong: #343844;
   --color-accent: #d6dbe3;

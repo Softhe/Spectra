@@ -290,7 +290,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
         <div className="flex flex-col gap-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-fg">{state.analysis.fileName}</p>
+              <p className="truncate text-sm font-medium text-fg" title={state.analysis.fileName}>
+                {state.analysis.fileName}
+              </p>
               <p className="mt-0.5 font-mono text-xs text-muted">
                 {state.analysis.container.codec}
                 {" · "}
@@ -353,7 +355,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
 
           <SpectrogramCanvas analysis={state.analysis} />
 
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+          <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[360px]:grid-cols-2">
             <Stat label="Spectral ceiling" value={formatHz(state.analysis.cutoffHz)} emphasize />
             <Stat label="True class" value={QUALITY_LABEL[state.analysis.qualityClass]} />
             <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
@@ -384,6 +386,10 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
         type="file"
         accept={ACCEPT}
         className="sr-only"
+        // Opened by the slot's own buttons; as a tab stop it is an invisible,
+        // unlabeled focus target.
+        tabIndex={-1}
+        aria-hidden
         onChange={(e) => {
           pick(e.target.files);
           e.target.value = "";
