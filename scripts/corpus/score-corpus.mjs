@@ -57,8 +57,8 @@ for (const item of manifest.items) {
   if (mono.length / item.sr > LITE_SEC) {
     // Mirror analyzeFile's Lite branch: loudness-ranked regions from the
     // buffer + display excerpt, sliced and concatenated, then runDsp with
-    // spans. (The app ranks on channel 0; only the mono mix is dumped, so
-    // ranking runs on that — identical for this near-mono signal.)
+    // spans. (The app ranks on the channel mean; only the mono mix is
+    // dumped here, which IS that mean — identical ranking.)
     const fakeBuf = { length: mono.length, sampleRate: item.sr, numberOfChannels: 1, getChannelData: () => mono };
     const regions = pickRegionsFromBuffer(fakeBuf);
     const excerpt = excerptRegion(mono.length, item.sr);

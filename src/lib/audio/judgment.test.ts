@@ -8,6 +8,8 @@ import {
   classifyQuality,
   compareAnalyses,
   decodeErrorMessage,
+  pickRegions,
+  pickRegionsFromBuffer,
   runDsp,
   scoreOf,
 } from "./analyze.ts";
@@ -698,5 +700,56 @@ describe("decodeErrorMessage", () => {
   it("falls back to the generic format list", () => {
     const m = decodeErrorMessage("song.m4a", "AAC");
     assert.equal(m, "Could not decode “song.m4a”. Try MP3, M4A, AAC, WAV, FLAC, or OGG.");
+  });
+});
+
+describe("pickRegionsFromBuffer", () => {
+  const sr = 8000;
+  const totalSec = 160; // > 20 s so pickRegions takes the loudness-ranked path
+  const mid = totalSec / 2;
+  const len = totalSec * sr;
+
+  /** Minimal AudioBuffer stand-in — the suite runs in plain node. */
+  const fakeBuffer = (channels: Float32Array[]): AudioBuffer =>
+    ({
+      length: channels[0]!.length,
+      sampleRate: sr,
+      numberOfChannels: channels.length,
+      getChannelData: (c: number) => channels[c]!,
+    }) as unknown as AudioBuffer;
+
+  // Opposite loud halves: ch0 loud in the first, ch1 louder in the second.
+  // The channel mean is louder in the second half (0.35 vs 0.2 amp), so
+  // channel-0-only ranking (the old bug) analyzed the quiet mix half.
+  const ch0 = new Float32Array(len);
+  const ch1 = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    if (i < mid * sr) ch0[i] = 0.4 * Math.sin(2 * Math.PI * 440 * t);
+    else ch1[i] = 0.7 * Math.sin(2 * Math.PI * 440 * t);
+  }
+  const meanMix = new Float32Array(len);
+  for (let i = 0; i < len; i++) meanMix[i] = (ch0[i]! + ch1[i]!) * 0.5;
+
+  it("ranks stereo by the channel mean — picks pickRegions' regions on the mixdown", () => {
+    assert.deepEqual(pickRegionsFromBuffer(fakeBuffer([ch0, ch1])), pickRegions(meanMix, sr));
+  });
+
+  it("prefers loud-mix windows over channel-0-only loudness", () => {
+    const regions = pickRegionsFromBuffer(fakeBuffer([ch0, ch1]));
+    const inLoudHalf = regions.filter((r) => r.start >= mid * sr).length;
+    assert.ok(
+      inLoudHalf >= 3,
+      `only ${inLoudHalf}/4 windows in the louder mix half: ${JSON.stringify(regions)}`,
+    );
+  });
+
+  it("is identical to pickRegions for mono buffers", () => {
+    const mono = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      const loud = Math.floor(i / sr / 40) % 2 === 0; // alternating 40 s bands
+      if (i % 5 === 0) mono[i] = (loud ? 0.5 : 0.05) * Math.sin(2 * Math.PI * 220 * (i / sr));
+    }
+    assert.deepEqual(pickRegionsFromBuffer(fakeBuffer([mono])), pickRegions(mono, sr));
   });
 });

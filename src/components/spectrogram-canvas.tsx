@@ -83,14 +83,21 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
     const { cutoffHz, nyquistHz } = analysis;
     const { maxHz } = analysis.spectrogram;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const cutY = (1 - cutoffHz / maxHz) * cssH;
-    ctx.strokeStyle = "rgba(232, 234, 238, 0.85)";
-    ctx.setLineDash([5, 4]);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, cutY);
-    ctx.lineTo(cssW, cutY);
-    ctx.stroke();
+    // A ceiling at/above the displayed top (full-band 48 kHz / hi-res files)
+    // has no in-view edge to mark. cutoffHz is clamped to the decode Nyquist,
+    // not to maxHz, so it can exceed the display range; drawing then lands
+    // the line at ≤ 0 px while the axis label clamps back into view.
+    const ceilingInView = cutoffHz < maxHz - 0.5;
+    if (ceilingInView) {
+      const cutY = (1 - cutoffHz / maxHz) * cssH;
+      ctx.strokeStyle = "rgba(232, 234, 238, 0.85)";
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, cutY);
+      ctx.lineTo(cssW, cutY);
+      ctx.stroke();
+    }
 
     if (nyquistHz < maxHz - 200) {
       const ny = (1 - nyquistHz / maxHz) * cssH;
@@ -170,11 +177,12 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
   // on the shortest (h-48, 192px) column.
   const pctOf = (hz: number) => (1 - hz / analysis.spectrogram.maxHz) * 100;
   const ceilingPct = Math.min(94, Math.max(6, pctOf(analysis.cutoffHz)));
+  const ceilingInView = analysis.cutoffHz < analysis.spectrogram.maxHz - 0.5;
   const LABEL_CLEARANCE_PCT = 8;
   const ticks = [0, 5, 10, 15, 20].filter(
     (k) =>
       k * 1000 <= analysis.spectrogram.maxHz + 50 &&
-      Math.abs(pctOf(k * 1000) - ceilingPct) >= LABEL_CLEARANCE_PCT,
+      (!ceilingInView || Math.abs(pctOf(k * 1000) - ceilingPct) >= LABEL_CLEARANCE_PCT),
   );
 
   return (
@@ -227,12 +235,14 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
               {k === 0 ? "0" : `${k}k`}
             </span>
           ))}
-          <span
-            className="absolute right-0 -translate-y-1/2 font-mono text-[10px] text-fg"
-            style={{ top: `${ceilingPct}%` }}
-          >
-            {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
-          </span>
+          {ceilingInView && (
+            <span
+              className="absolute right-0 -translate-y-1/2 font-mono text-[10px] text-fg"
+              style={{ top: `${ceilingPct}%` }}
+            >
+              {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
+            </span>
+          )}
         </div>
         {hover != null && (
           <div className="mt-1 text-right font-mono text-[11px] whitespace-nowrap text-fg tabular-nums">
