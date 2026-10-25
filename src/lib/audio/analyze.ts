@@ -251,8 +251,18 @@ export function pickRegionsFromBuffer(buffer: AudioBuffer): Region[] {
   const totalSec = length / sampleRate;
   const windowSec = Math.min(4, totalSec / 3);
   const win = Math.floor(windowSec * sampleRate);
-  const ch0 = buffer.getChannelData(0);
-  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, (i) => ch0[i]!);
+  // Tap the channel mean, matching pickRegions' mono mixdown: ranking on
+  // channel 0 alone misranks windows over hard-panned material whose left
+  // channel goes quiet where the mix is loud. Strided taps keep this cheap.
+  const chs: Float32Array[] = [];
+  for (let c = 0; c < buffer.numberOfChannels; c++) chs.push(buffer.getChannelData(c));
+  const scale = 1 / Math.max(1, chs.length);
+  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, (i) => {
+    if (chs.length === 1) return chs[0]![i]!;
+    let v = 0;
+    for (let c = 0; c < chs.length; c++) v += chs[c]![i]!;
+    return v * scale;
+  });
   return rankWindows(blockRms, nBlocks, block, length, win, 4);
 }
 
