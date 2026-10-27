@@ -170,20 +170,16 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
   // render time. Pointer probes land on the same representation.
   const hoverTop = hover == null ? null : (1 - hover / analysis.spectrogram.maxHz) * 100;
 
-  // Axis positions are percent-from-top of the 0..maxHz column. The ceiling
-  // label is clamped to 6–94% so it never clips at the edges; a tick whose
-  // rendered position sits within one label height of the label's (clamped)
-  // position would overlap it, so it is hidden. 8% ≈ a 10px label's line box
-  // on the shortest (h-48, 192px) column.
+  // Axis positions are percent-from-top of the 0..maxHz column. The tick set
+  // is fixed so File A and File B read against identical axes; the measured
+  // ceiling gets its own label on the dashed line inside the plot instead of
+  // displacing a tick (which made the two axes differ at a glance).
   const pctOf = (hz: number) => (1 - hz / analysis.spectrogram.maxHz) * 100;
-  const ceilingPct = Math.min(94, Math.max(6, pctOf(analysis.cutoffHz)));
+  const ceilingPct = Math.max(0, pctOf(analysis.cutoffHz));
   const ceilingInView = analysis.cutoffHz < analysis.spectrogram.maxHz - 0.5;
-  const LABEL_CLEARANCE_PCT = 8;
-  const ticks = [0, 5, 10, 15, 20].filter(
-    (k) =>
-      k * 1000 <= analysis.spectrogram.maxHz + 50 &&
-      (!ceilingInView || Math.abs(pctOf(k * 1000) - ceilingPct) >= LABEL_CLEARANCE_PCT),
-  );
+  // Near the top there is no room above the line, so the label hangs below it.
+  const ceilingLabelBelow = ceilingPct < 12;
+  const ticks = [0, 5, 10, 15, 20].filter((k) => k * 1000 <= analysis.spectrogram.maxHz + 50);
 
   return (
     <div className={cn("flex gap-2", className)}>
@@ -209,6 +205,16 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
             role="img"
             aria-label={`Spectrogram of ${analysis.fileName}, ceiling ${formatHz(analysis.cutoffHz)}`}
           />
+          <span
+            className={cn(
+              "pointer-events-none absolute right-1.5 rounded bg-bg/85 px-1 py-px font-mono text-[10px] leading-none text-fg tabular-nums",
+              ceilingLabelBelow ? "mt-1" : "-translate-y-full -mt-1",
+            )}
+            style={{ top: `${ceilingInView ? ceilingPct : 0}%` }}
+          >
+            {ceilingInView ? "" : "≥ "}
+            {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
+          </span>
           {hoverTop != null && (
             <div
               className="pointer-events-none absolute inset-x-0 h-px bg-fg/70"
@@ -235,14 +241,6 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
               {k === 0 ? "0" : `${k}k`}
             </span>
           ))}
-          {ceilingInView && (
-            <span
-              className="absolute right-0 -translate-y-1/2 font-mono text-[10px] text-fg"
-              style={{ top: `${ceilingPct}%` }}
-            >
-              {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
-            </span>
-          )}
         </div>
         {hover != null && (
           <div className="mt-1 text-right font-mono text-[11px] whitespace-nowrap text-fg tabular-nums">
