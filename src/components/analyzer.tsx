@@ -884,6 +884,13 @@ function ScoreBar({
     { key: "clarity", label: "Spectral cleanliness", pts: parts.clarity },
   ] as const;
   const tone = highlighted ? "win" : "muted";
+  // scoreOf can cap the total (noise-starved encodes) and docks clipping, so
+  // the parts may not add up to the score. Scale the bar to the real score
+  // and list the difference explicitly in the breakdown.
+  const positiveSum = segments.reduce((sum, s) => sum + s.pts, 0);
+  const barScale = positiveSum > score && positiveSum > 0 ? score / positiveSum : 1;
+  const capPts = score - (positiveSum + parts.clip);
+  const capped = capPts < -0.05;
   return (
     <div>
       <div className="flex items-baseline justify-between gap-2">
@@ -918,7 +925,7 @@ function ScoreBar({
               key={s.key}
               title={`${s.label}: ${s.pts.toFixed(1)} pts`}
               className={cn("h-full rounded-full", segClass[tone]![i])}
-              style={{ width: `${Math.min(100, s.pts)}%` }}
+              style={{ width: `${Math.min(100, s.pts * barScale)}%` }}
             />
           ) : null,
         )}
@@ -944,6 +951,21 @@ function ScoreBar({
               <dd className="font-mono text-loss">{parts.clip.toFixed(1)} pts</dd>
             </>
           )}
+          {capped && (
+            <>
+              <dt>
+                Noise cap
+                <span className="block text-faint">
+                  Broadband hiss reads like a starved encode, so the score is held at 35 or below
+                </span>
+              </dt>
+              <dd className="font-mono text-loss">{capPts.toFixed(1)} pts</dd>
+            </>
+          )}
+          <dt className="border-t border-border pt-1.5 text-fg">Score</dt>
+          <dd className="border-t border-border pt-1.5 font-mono text-fg">
+            {score.toFixed(1)} / 100
+          </dd>
         </dl>
       </details>
     </div>

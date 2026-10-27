@@ -4,6 +4,10 @@ import { formatHz } from "@/lib/audio/format";
 import type { Analysis, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
+/** Left gutter for the dB labels, in CSS px. The frequency label row below
+ *  uses the same value so it stays aligned at any root font size. */
+const GUTTER_PX = 40;
+
 type Props = {
   a: Analysis | null;
   b: Analysis | null;
@@ -50,7 +54,7 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       const wrap = wrapRef.current;
       if (!canvas || !wrap) return;
       const fullWidth = wrap.clientWidth;
-      const w = fullWidth - 40;
+      const w = fullWidth - GUTTER_PX;
       const h = wrap.clientHeight;
       if (w < 8 || h < 8) return;
       const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -62,7 +66,7 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, fullWidth, h);
-      ctx.translate(40, 0);
+      ctx.translate(GUTTER_PX, 0);
 
       const maxHz = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
       const dbMin = -90;
@@ -208,7 +212,10 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       {/* Labels sit at the true frequency positions (the axis runs to the
           spectrogram's maxHz, not exactly 20 kHz), aligned with the 10/20 kHz
           gridlines drawn above. */}
-      <div className="relative mt-1 ml-10 h-4 font-mono text-xs text-faint">
+      <div
+        className="relative mt-1 h-4 font-mono text-xs text-faint"
+        style={{ marginLeft: GUTTER_PX }}
+      >
         <span className="absolute left-0">0</span>
         {[10, 20]
           .filter((k) => k * 1000 < maxHzLabel)
