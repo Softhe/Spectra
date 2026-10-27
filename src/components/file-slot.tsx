@@ -214,10 +214,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
             </span>
           )}
           {state.status === "ready" && state.analysis.liteAnalysis && (
-            <span
-              className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-[11px] text-warn"
-              title="Very long file: analyzed from its loudest excerpts to stay within memory limits"
-            >
+            <span className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-xs text-warn">
               Lite
             </span>
           )}
@@ -254,7 +251,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
       {state.status === "loading" && (
         <div className="flex min-h-52 flex-1 flex-col items-center justify-center gap-3 px-4">
           <AudioLines className="size-6 text-muted" />
-          <p className="text-sm text-fg">Reading {state.fileName}</p>
+          <p className="max-w-full text-center text-sm text-fg [overflow-wrap:anywhere]">
+            Reading {state.fileName}
+          </p>
           <p aria-live="polite" className="font-mono text-xs text-muted">
             {state.phase}
           </p>
@@ -358,26 +357,39 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
           <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[360px]:grid-cols-2">
             <Stat label="Spectral ceiling" value={formatHz(state.analysis.cutoffHz)} emphasize />
             <Stat label="True class" value={QUALITY_LABEL[state.analysis.qualityClass]} />
-            <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
-            <Stat
-              label="Header bitrate"
-              value={
-                state.analysis.container.claimedKbps
-                  ? `${formatKbps(state.analysis.container.claimedKbps)}${state.analysis.container.vbr ? " VBR" : ""}`
-                  : "—"
-              }
-            />
-            <Stat label="Rolloff" value={ROLLOFF_LABEL[state.analysis.rolloff]} />
-            <Stat
-              label="Sample rate"
-              value={`${formatSampleRate(state.analysis.sampleRate)} · ${channelLabel(state.analysis.channels)}`}
-            />
-            <Stat
-              label="Peak / RMS"
-              value={`${formatDb(state.analysis.peakDb)} / ${formatDb(state.analysis.rmsDb)}`}
-            />
-            <Stat label="Crest" value={formatDb(state.analysis.crestDb)} />
           </dl>
+          <details className="rounded-md border border-border px-3">
+            <summary className="min-h-11 cursor-pointer py-3 text-xs font-medium text-fg focus-visible:outline-2 focus-visible:outline-accent">
+              Analysis details · {label}
+            </summary>
+            {state.analysis.liteAnalysis && (
+              <p className="mb-3 text-xs leading-relaxed text-warn">
+                Lite analysis: this long file was analyzed from its loudest excerpts to stay within
+                memory limits.
+              </p>
+            )}
+            <dl className="grid grid-cols-1 gap-x-4 gap-y-3 pb-4 min-[360px]:grid-cols-2">
+              <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
+              <Stat
+                label="Header bitrate"
+                value={
+                  state.analysis.container.claimedKbps
+                    ? `${formatKbps(state.analysis.container.claimedKbps)}${state.analysis.container.vbr ? " VBR" : ""}`
+                    : "—"
+                }
+              />
+              <Stat label="Rolloff" value={ROLLOFF_LABEL[state.analysis.rolloff]} />
+              <Stat
+                label="Sample rate"
+                value={`${formatSampleRate(state.analysis.sampleRate)} · ${channelLabel(state.analysis.channels)}`}
+              />
+              <Stat
+                label="Peak / RMS"
+                value={`${formatDb(state.analysis.peakDb)} / ${formatDb(state.analysis.rmsDb)}`}
+              />
+              <Stat label="Crest" value={formatDb(state.analysis.crestDb)} />
+            </dl>
+          </details>
         </div>
       )}
 
@@ -453,7 +465,7 @@ function SeekBar({
 function Stat({ label, value, emphasize }: { label: string; value: string; emphasize?: boolean }) {
   return (
     <div>
-      <dt className="text-[11px] tracking-wide text-faint uppercase">{label}</dt>
+      <dt className="text-xs tracking-wide text-faint uppercase">{label}</dt>
       <dd
         className={cn(
           "mt-0.5 font-mono text-xs tabular-nums",

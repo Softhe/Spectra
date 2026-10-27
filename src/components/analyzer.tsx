@@ -576,8 +576,9 @@ export function Analyzer() {
               Which copy kept the air?
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
-              Encoders write a bitrate in the header. That is a claim. Spectra reads the audio
-              itself — a 320 kbps file upconverted from 128 still dies at 16 kHz.
+              Compare two copies of the same song to find which kept more detail. Encoders write a
+              bitrate in the header. That is a claim. Spectra reads the audio itself — a 320 kbps
+              file upconverted from 128 still dies at 16 kHz.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -612,8 +613,9 @@ export function Analyzer() {
               Both slots hold the same bytes
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
-              {a.fileName} matched itself bit-for-bit, so there is nothing to declare. Drop a
-              different copy of the song into either slot to compare.
+              <span className="[overflow-wrap:anywhere]">{a.fileName}</span> matched itself
+              bit-for-bit, so there is nothing to declare. Drop a different copy of the song into
+              either slot to compare.
             </p>
           </aside>
         ) : (
@@ -882,6 +884,13 @@ function ScoreBar({
     { key: "clarity", label: "Spectral cleanliness", pts: parts.clarity },
   ] as const;
   const tone = highlighted ? "win" : "muted";
+  // scoreOf can cap the total (noise-starved encodes) and docks clipping, so
+  // the parts may not add up to the score. Scale the bar to the real score
+  // and list the difference explicitly in the breakdown.
+  const positiveSum = segments.reduce((sum, s) => sum + s.pts, 0);
+  const barScale = positiveSum > score && positiveSum > 0 ? score / positiveSum : 1;
+  const capPts = score - (positiveSum + parts.clip);
+  const capped = capPts < -0.05;
   return (
     <div>
       <div className="flex items-baseline justify-between gap-2">
@@ -916,11 +925,49 @@ function ScoreBar({
               key={s.key}
               title={`${s.label}: ${s.pts.toFixed(1)} pts`}
               className={cn("h-full rounded-full", segClass[tone]![i])}
-              style={{ width: `${Math.min(100, s.pts)}%` }}
+              style={{ width: `${Math.min(100, s.pts * barScale)}%` }}
             />
           ) : null,
         )}
       </div>
+      <details className="mt-2 text-xs text-muted">
+        <summary className="min-h-9 cursor-pointer py-2 text-fg focus-visible:outline-2 focus-visible:outline-accent">
+          {label} score breakdown
+        </summary>
+        <p className="mb-2 leading-relaxed">
+          A composite score out of 100 based on bandwidth, rolloff, high-frequency content, and
+          spectral cleanliness. It describes the encoding evidence, not the musical performance.
+        </p>
+        <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5">
+          {segments.map((segment) => (
+            <div key={segment.key} className="contents">
+              <dt>{segment.label}</dt>
+              <dd className="font-mono">{segment.pts.toFixed(1)} pts</dd>
+            </div>
+          ))}
+          {parts.clip < 0 && (
+            <>
+              <dt>Sustained clipping deduction</dt>
+              <dd className="font-mono text-loss">{parts.clip.toFixed(1)} pts</dd>
+            </>
+          )}
+          {capped && (
+            <>
+              <dt>
+                Noise cap
+                <span className="block text-faint">
+                  Broadband hiss reads like a starved encode, so the score is held at 35 or below
+                </span>
+              </dt>
+              <dd className="font-mono text-loss">{capPts.toFixed(1)} pts</dd>
+            </>
+          )}
+          <dt className="border-t border-border pt-1.5 text-fg">Score</dt>
+          <dd className="border-t border-border pt-1.5 font-mono text-fg">
+            {score.toFixed(1)} / 100
+          </dd>
+        </dl>
+      </details>
     </div>
   );
 }
@@ -997,39 +1044,47 @@ function CompareTable({ a, b, winner }: { a: Analysis; b: Analysis; winner: Slot
 
   return (
     <div className="overflow-hidden rounded-xl bg-bg-elevated">
-      <div className="grid grid-cols-[minmax(0,1.2fr)_1fr_1fr] border-b border-border px-4 py-3 font-mono text-[11px] tracking-widest text-faint uppercase sm:px-5">
-        <span>Metric</span>
-        <span className={cn("inline-flex items-center gap-1", winner === "a" && "text-win")}>
-          {winner === "a" && <Trophy className="size-3" />}A
-        </span>
-        <span className={cn("inline-flex items-center gap-1", winner === "b" && "text-win")}>
-          {winner === "b" && <Trophy className="size-3" />}B
-        </span>
-      </div>
-      {rows.map((row) => (
-        <div
-          key={row.label}
-          className="grid grid-cols-[minmax(0,1.2fr)_1fr_1fr] border-b border-border/70 px-4 py-3 last:border-b-0 sm:px-5"
-        >
-          <span className="text-xs text-muted">{row.label}</span>
-          <span
-            className={cn(
-              "font-mono text-xs tabular-nums",
-              row.better === "a" ? "text-fg" : "text-muted",
-            )}
-          >
-            {row.av}
-          </span>
-          <span
-            className={cn(
-              "font-mono text-xs tabular-nums",
-              row.better === "b" ? "text-fg" : "text-muted",
-            )}
-          >
-            {row.bv}
-          </span>
-        </div>
-      ))}
+      <table className="w-full table-fixed text-left text-xs">
+        <caption className="sr-only">Audio comparison measurements for File A and File B</caption>
+        <thead className="border-b border-border font-mono tracking-widest text-faint uppercase">
+          <tr>
+            <th scope="col" className="w-[38%] px-4 py-3 font-normal sm:px-5">
+              Metric
+            </th>
+            <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
+              File A {winner === "a" && <Trophy aria-label="Winner" className="inline size-3" />}
+            </th>
+            <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
+              File B {winner === "b" && <Trophy aria-label="Winner" className="inline size-3" />}
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.label} className="border-b border-border/70 last:border-b-0">
+              <th scope="row" className="px-4 py-3 font-normal text-muted sm:px-5">
+                {row.label}
+              </th>
+              <td
+                className={cn(
+                  "py-3 pr-2 font-mono tabular-nums",
+                  row.better === "a" ? "text-fg" : "text-muted",
+                )}
+              >
+                {row.av}
+              </td>
+              <td
+                className={cn(
+                  "py-3 pr-4 font-mono tabular-nums",
+                  row.better === "b" ? "text-fg" : "text-muted",
+                )}
+              >
+                {row.bv}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
