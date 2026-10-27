@@ -49,18 +49,20 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       const canvas = canvasRef.current;
       const wrap = wrapRef.current;
       if (!canvas || !wrap) return;
-      const w = wrap.clientWidth;
+      const fullWidth = wrap.clientWidth;
+      const w = fullWidth - 40;
       const h = wrap.clientHeight;
       if (w < 8 || h < 8) return;
       const dpr = Math.min(2, window.devicePixelRatio || 1);
-      canvas.width = Math.floor(w * dpr);
+      canvas.width = Math.floor(fullWidth * dpr);
       canvas.height = Math.floor(h * dpr);
-      canvas.style.width = `${w}px`;
+      canvas.style.width = `${fullWidth}px`;
       canvas.style.height = `${h}px`;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
+      ctx.clearRect(0, 0, fullWidth, h);
+      ctx.translate(40, 0);
 
       const maxHz = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
       const dbMin = -90;
@@ -84,12 +86,19 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
         ctx.lineTo(x, h);
         ctx.stroke();
       }
+      const faint = getComputedStyle(wrap).getPropertyValue("--color-faint").trim() || "#7b808a";
+      ctx.font = "12px 'IBM Plex Mono', monospace";
+      ctx.textAlign = "right";
+      ctx.fillStyle = faint;
+      ctx.fillText(String(dbMax), -8, 12);
+      ctx.fillText(String(dbMin), -8, h - 2);
       for (const db of [-30, -50, -70]) {
         const y = h - ((db - dbMin) / (dbMax - dbMin)) * h;
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(w, y);
         ctx.stroke();
+        if (y > 20 && y < h - 16) ctx.fillText(String(db), -8, y + 4);
       }
 
       const style = getComputedStyle(wrap);
@@ -107,11 +116,13 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       if (winnerId === "a") traces.reverse();
       traces.forEach((t, i) => {
         ctx.globalAlpha = decided && i < traces.length - 1 ? 0.75 : 1;
+        ctx.setLineDash(t.id === "b" ? [6, 4] : []);
         drawTrace(ctx, t.x.meanDb, t.x.meanDbHzPerBin, t.col, w, h, maxHz, dbMin, dbMax);
       });
       ctx.globalAlpha = 1;
+      ctx.setLineDash([]);
 
-      const mark = (hz: number, color: string) => {
+      const mark = (hz: number, color: string, label: string, y: number) => {
         const x = (hz / maxHz) * w;
         ctx.strokeStyle = color;
         ctx.setLineDash([3, 3]);
@@ -120,9 +131,17 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
         ctx.lineTo(x, h);
         ctx.stroke();
         ctx.setLineDash([]);
+        const text = `${label} ${formatHz(hz)}`;
+        const textWidth = ctx.measureText(text).width;
+        const labelX = Math.max(4, Math.min(x - textWidth - 5, w - textWidth - 4));
+        ctx.fillStyle = "#101218";
+        ctx.fillRect(labelX - 2, y - 11, textWidth + 4, 15);
+        ctx.fillStyle = color;
+        ctx.textAlign = "left";
+        ctx.fillText(text, labelX, y);
       };
-      if (a) mark(a.cutoffHz, colA);
-      if (b) mark(b.cutoffHz, colB);
+      if (a) mark(a.cutoffHz, colA, "A", 14);
+      if (b) mark(b.cutoffHz, colB, "B", 32);
     }
 
     paint();
@@ -154,21 +173,21 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
         <div>
           <h2 className="text-sm font-medium text-fg">Average spectrum</h2>
           <p className="mt-0.5 text-xs text-muted">
-            Energy versus frequency. A cliff is the encoder throwing highs away.
+            Level (dB) versus frequency · vertical range auto-scales. A cliff shows lost highs.
           </p>
         </div>
-        <div className="flex gap-4 font-mono text-[11px]">
+        <div className="flex flex-wrap gap-4 font-mono text-xs">
           {a && (
             <span className="flex items-center gap-1.5 text-trace-a">
               {winnerId === "a" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block size-2 rounded-full bg-trace-a" />A ·{" "}
+              <span className="inline-block w-5 border-t-2 border-trace-a" />A ·{" "}
               {formatHz(a.cutoffHz)}
             </span>
           )}
           {b && (
             <span className="flex items-center gap-1.5 text-trace-b">
               {winnerId === "b" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block size-2 rounded-full bg-trace-b" />B ·{" "}
+              <span className="inline-block w-5 border-t-2 border-dashed border-trace-b" />B ·{" "}
               {formatHz(b.cutoffHz)}
             </span>
           )}
@@ -189,7 +208,7 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       {/* Labels sit at the true frequency positions (the axis runs to the
           spectrogram's maxHz, not exactly 20 kHz), aligned with the 10/20 kHz
           gridlines drawn above. */}
-      <div className="relative mt-1 h-4 font-mono text-[11px] text-faint">
+      <div className="relative mt-1 ml-10 h-4 font-mono text-xs text-faint">
         <span className="absolute left-0">0</span>
         {[10, 20]
           .filter((k) => k * 1000 < maxHzLabel)
