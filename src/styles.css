@@ -39,6 +39,10 @@
   --color-accent-fg: #0a0b0d;
   --color-trace-a: #8fbfb4;
   --color-trace-b: #c4b49a;
+  /* Slots C/D join in 3–4-file rankings: same lightness band as A/B, hues
+     kept distinct (teal/sage vs sand; the pair stays teal-vs-sand reads). */
+  --color-trace-c: #a8a4c8;
+  --color-trace-d: #c8a4b0;
   --color-win: #8fbfa8;
   --color-win-fg: #0a0b0d;
   --color-loss: #c48b7a;

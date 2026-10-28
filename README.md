@@ -1,8 +1,10 @@
 # Spectra
 
-Which copy kept the air? Drop two files of the _same song_ from different
-sources (a SoundCloud MP3 vs an M4A, a WAV vs a FLAC) and Spectra tells you
-which one is actually higher quality — by reading the audio, not the header.
+Which copy kept the air? Drop two to four files of the _same song_ from
+different sources (a SoundCloud MP3 vs an M4A, a WAV vs a FLAC) and Spectra
+tells you which one is actually higher quality — by reading the audio, not
+the header. If the files disagree about being the same song, it says that
+too instead of inventing a winner.
 
 ![Spectra demo comparison](docs/screenshot.png)
 
@@ -19,12 +21,38 @@ frequency where the encoder truly gave up — plus rolloff character, a
   rolloff classification, and a codec-only quality score, calibrated on a
   93-item labeled corpus (MP3, AAC, Opus, ALAC, transcodes, upconverts, at
   44.1 and 48 kHz, plus 40-second and 16-minute files).
-- **Fake-lossless flagging** — a WAV/FLAC/ALAC that measures band-limited
-  gets called out, whatever the header claims.
-- **Side-by-side evidence** — per-file spectrograms with cutoff markers,
-  an overlaid average-spectrum plot, and a metric-by-metric table.
+- **Same-song verification** — a loudness envelope kept per file checks that
+  the two slots really hold the same recording (and how one trims the
+  intro). Mismatched uploads are flagged instead of judged; near-threshold
+  pairs report "uncertain", never a confident guess from too little
+  evidence.
+- **Fair (shared-window) comparison** — once all files are analyzed, every
+  copy is re-measured over one envelope-aligned window of the loudest
+  passage they share. A trimmed copy that lost its intro is no longer
+  judged on quieter material; the "Refined" badge marks where a
+  re-measured ceiling changed the number.
+- **Double-blind listening** — a blind round hides names, numbers and
+  spectrograms behind anonymous Clip 1 / Clip 2 (including the winner
+  chips), shuffles which copy sits in which slot, and reveals the mapping
+  on your call.
+- **Lossless depth, honestly reported** — a strict integer-grid check reads
+  the bit depth the content actually sits on: 16-bit audio padded into a
+  24-bit container is labeled "16-bit of 24", and dithered material is
+  reported at the container depth rather than guessed.
+- **Interactive excerpt re-scan** — spectrograms render a representative
+  excerpt by default; "Re-scan at playhead" runs the DSP over the exact
+  passage you just heard and pins it into the picture until you reset.
+- **Huge WAVs stay Lite and complete** — PCM WAVs over the decode cap are
+  analyzed by streaming straight off the file header walk (one-slice at a
+  time) with identical decodeAudioData-parity scaling, instead of being OOM
+  killed or truncated.
+- **Up to four files at once** — a head-to-head leaderboard (round-robin
+  points) puts every pair through the same verdict rules, with per-pair
+  ear chips that jump straight into matched-loudness A/B on that pair.
 - **A/B compare by ear** — one click previews both copies back-to-back at
-  the same position with RMS-matched loudness, plus a global volume slider.
+  the same position with RMS-matched loudness, plus a global volume slider,
+  an optional 5-second aligned loop on tough passages, keyboard A/B
+  flipping, and Swap A/B to undo any order effects.
 - **Honest ties** — quiet/acoustic material with no high-frequency content
   is reported as source-limited instead of misgraded.
 - **Fast on big files** — DSP runs in a Web Worker, results are cached in
@@ -40,14 +68,14 @@ npm install
 npm run dev      # http://0.0.0.0:8080
 npm run build    # production bundle + DB migrate (skips without DATABASE_URL)
 npm run typecheck
-npm test         # repo unit suites
+npm test         # repo unit suites (incl. alignment + WAV-streaming tests)
 ```
 
-Drop two audio files (MP3, M4A/AAC, WAV, FLAC, AIFF, OGG/Opus, WebM) into
-File A and File B — or press **Load a demo comparison** to see a full-range
-master called out against a 16 kHz brickwalled rip hiding behind identical
-headers. Apple Lossless (ALAC `.m4a`) decodes only in Safari; elsewhere,
-convert it to FLAC or WAV first.
+Drop two to four audio files (MP3, M4A/AAC, WAV, FLAC, AIFF, OGG/Opus,
+WebM) into the slots (A–D) — or press **Load a demo comparison** to see a
+full-range master called out against a 16 kHz brickwalled rip hiding behind
+identical headers. Apple Lossless (ALAC `.m4a`) decodes only in Safari;
+elsewhere, convert it to FLAC or WAV first.
 
 ## How it works
 
@@ -60,6 +88,17 @@ distrusted: VBR MP3s report unknown bitrate instead of the first-frame
 placeholder, and MP3 is only claimed after a confirmed frame sync. M4A's
 index is found wherever it sits in the file (even after the audio), and the
 codec comes from the sample entry, so ALAC isn't mistaken for AAC.
+
+Around that core sit four small modules:
+
+- `align.ts` — loudness-envelope capture (kept on every analysis) plus the
+  same-song check and lag finding behind the "Hold on — these may not be
+  the same song" guard and the pair-aligned A/B loop.
+- `refine.ts` — the shared-window re-measurement pass (fair comparison).
+- `wav-source.ts` — bounded-memory streaming PCM readers for huge WAVs
+  (header-only walk, frame-range slices, decodeAudioData-parity scaling).
+- `rank.ts` — round-robin pairwise ranking for the 3–4 file leaderboard,
+  with refined metrics patched in so numbers never disagree between views.
 
 The DSP core (`runDsp`) is shared verbatim between the main-thread fallback
 and `dsp.worker.ts`, so both paths produce identical numbers by construction.

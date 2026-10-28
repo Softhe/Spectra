@@ -1,3 +1,5 @@
+import type { Envelope, SongMatch } from "./align";
+
 export type QualityClass = "lossless" | "high" | "medium" | "standard" | "low" | "telephone";
 
 export type RolloffKind = "natural" | "brickwall" | "steep";
@@ -57,6 +59,20 @@ export type Analysis = {
   liteAnalysis: boolean;
   /** Sampled content hash (IndexedDB key). Equal keys = identical bytes. */
   cacheKey: string | null;
+  /**
+   * How the decode rate came to be the one measured. Refinement passes and
+   * excerpt scans re-decode and must reproduce the same rate semantics, so
+   * the confirmed/guessed distinction is carried on the analysis.
+   */
+  decode?: { rateConfirmed: boolean; sourceRateHint: number | null };
+  /** Loudness envelope (same-song verification + shared-window refinement). */
+  envelope?: Envelope;
+  /**
+   * Effective bit depth for lossless containers: a 24-bit container whose
+   * audio fits the 16-bit grid exactly reads 16. Null when undocumented
+   * (lossy containers, float containers, no clean integer grid).
+   */
+  effectiveBits?: number | null;
   peakDb: number;
   rmsDb: number;
   crestDb: number;
@@ -71,7 +87,7 @@ export type Analysis = {
   spectrogram: SpectrogramData;
 };
 
-export type SlotId = "a" | "b";
+export type SlotId = "a" | "b" | "c" | "d";
 
 export type Comparison = {
   winner: SlotId | "tie";
@@ -80,4 +96,10 @@ export type Comparison = {
   detail: string;
   cutoffDeltaHz: number;
   sameLength: boolean;
+  /**
+   * Envelope-based same-song verification, present when both sides carried an
+   * envelope. A "different" status turns the verdict into a guarded tie: two
+   * unrelated recordings would otherwise fight over a meaningless winner.
+   */
+  songMatch?: SongMatch;
 };

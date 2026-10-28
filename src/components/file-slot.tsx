@@ -1,4 +1,4 @@
-import { AudioLines, Pause, Play, Trophy, Upload, X } from "lucide-react";
+import { AudioLines, Crosshair, EyeOff, Pause, Play, Trophy, Upload, X } from "lucide-react";
 import * as Slider from "@radix-ui/react-slider";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, STOP_EVENT } from "@/components/audio-drop";
@@ -14,16 +14,40 @@ import {
   formatKbps,
   formatSampleRate,
 } from "@/lib/audio/format";
-import type { Analysis, SlotId } from "@/lib/audio/types";
+import type { Analysis, SlotId, SpectrogramData } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
 export type SlotState =
   | { status: "idle" }
-  | { status: "loading"; fileName: string; progress: number; phase: string }
+  | { status: "loading"; fileName: string; progress: number; phase: string; eta?: string }
   | { status: "error"; message: string }
   | { status: "ready"; analysis: Analysis };
 
 export type Outcome = "win" | "lose" | "tie" | null;
+
+export const SLOT_LABELS: Record<SlotId, string> = {
+  a: "File A",
+  b: "File B",
+  c: "File C",
+  d: "File D",
+};
+
+const TRACE_CLASS: Record<SlotId, string> = {
+  a: "text-trace-a",
+  b: "text-trace-b",
+  c: "text-trace-c",
+  d: "text-trace-d",
+};
+
+/** Blind-mode display names: the slot letters turn into anonymous clips. */
+export const CLIP_LABELS: Record<SlotId, string> = {
+  a: "Clip 1",
+  b: "Clip 2",
+  c: "Clip 3",
+  d: "Clip 4",
+};
+
+export type ScanState = { busy: boolean; progress: number; phase: string } | null;
 
 type Props = {
   id: SlotId;
@@ -33,7 +57,22 @@ type Props = {
   onClear: () => void;
   /** A drop onto this slot carried no audio-like file. */
   onRejectedDrop: () => void;
+  /** Double-blind mode: hide identity, numbers, and pictures until reveal. */
+  masked?: boolean;
+  /** Shared-window re-measurement, when the refinement pass succeeded. */
+  refinedCutoffHz?: number | null;
+  /** Re-computed quality class over that window (pairs with refinedCutoffHz). */
+  refinedClass?: Analysis["qualityClass"] | null;
+  loopWindow?: { start: number; length: number } | null;
+  /** Excerpt re-scan at the playhead (disabled while another scan runs). */
+  scanState?: ScanState;
+  onScan?: (seekSec: number) => void;
+  /** A completed pinned excerpt replaces the default spectrogram picture. */
+  override?: SpectrogramData | null;
+  onResetOverride?: () => void;
 };
+
+const LOOP_WRAP_BACK = 0.75; // s — tolerate a small overshoot before re-wrapping
 
 const ACCEPT = "audio/*,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif,.mp4,.caf,.webm";
 
@@ -43,7 +82,22 @@ function dragHasFiles(e: DragEvent): boolean {
   return [...(e.dataTransfer?.types ?? [])].includes("Files");
 }
 
-export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }: Props) {
+export function FileSlot({
+  id,
+  state,
+  outcome,
+  onFile,
+  onClear,
+  onRejectedDrop,
+  masked,
+  refinedCutoffHz,
+  refinedClass,
+  loopWindow,
+  scanState,
+  onScan,
+  override,
+  onResetOverride,
+}: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [over, setOver] = useState(false);
@@ -51,8 +105,8 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
   const [playError, setPlayError] = useState<string | null>(null);
   const [position, setPosition] = useState(0);
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
-  const label = id === "a" ? "File A" : "File B";
-  const trace = id === "a" ? "text-trace-a" : "text-trace-b";
+  const label = masked ? CLIP_LABELS[id] : SLOT_LABELS[id];
+  const trace = TRACE_CLASS[id];
 
   const readyId = state.status === "ready" ? state.analysis.id : "";
   useEffect(() => {
@@ -165,6 +219,27 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
     window.dispatchEvent(new CustomEvent<SlotId>(STOP_EVENT, { detail: id }));
   }
 
+  // A/B loop: when active, this preview's playhead wraps to the pinned start
+  // (pair-aligned upstream) so identical positions repeat until stopped.
+  function handleTime(tRaw: number) {
+    const el = audioRef.current;
+    if (!el || !loopWindow || !playing) {
+      setPosition(tRaw);
+      return;
+    }
+    const { start, length } = loopWindow;
+    if (tRaw === tRaw && (tRaw > start + length || tRaw < start - LOOP_WRAP_BACK)) {
+      try {
+        el.currentTime = start;
+      } catch {
+        // Not seekable yet.
+      }
+      setPosition(start);
+      return;
+    }
+    setPosition(tRaw);
+  }
+
   return (
     <section
       aria-label={`${label}${outcome === "win" ? " (winner)" : outcome === "lose" ? " (runner-up)" : ""}`}
@@ -202,7 +277,7 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {state.status === "ready" && (
+          {state.status === "ready" && !masked && (
             <span
               className={cn(
                 "rounded-md px-2 py-0.5 font-mono text-[11px] tabular-nums",
@@ -213,9 +288,19 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
               {state.analysis.score.toFixed(0)}/100
             </span>
           )}
-          {state.status === "ready" && state.analysis.liteAnalysis && (
-            <span className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-xs text-warn">
-              Lite
+          {state.status === "ready" &&
+            state.analysis.liteAnalysis &&
+            !masked && (
+              <span className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-xs text-warn">
+                Lite
+              </span>
+            )}
+          {typeof refinedCutoffHz === "number" && (
+            <span
+              className="rounded-md bg-info/15 px-2 py-0.5 font-mono text-[10px] text-info"
+              title="Re-measured over a shared, envelope-aligned window so both files are judged on identical musical material"
+            >
+              Refined
             </span>
           )}
           {state.status !== "idle" && (
@@ -271,6 +356,9 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
               style={{ width: `${Math.round(state.progress * 100)}%` }}
             />
           </div>
+          {state.eta && (
+            <p className="font-mono text-[11px] text-faint tabular-nums">~{state.eta} left</p>
+          )}
         </div>
       )}
 
@@ -287,49 +375,72 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
 
       {state.status === "ready" && (
         <div className="flex flex-col gap-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-fg" title={state.analysis.fileName}>
-                {state.analysis.fileName}
-              </p>
-              <p className="mt-0.5 font-mono text-xs text-muted">
-                {state.analysis.container.codec}
-                {" · "}
-                {formatBytes(state.analysis.fileSize)}
-                {" · "}
-                {formatDuration(state.analysis.durationSec)}
-              </p>
+          {masked ? (
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-fg" aria-label="Identity hidden">
+                  Identity hidden until reveal
+                </p>
+                <p className="mt-0.5 flex items-center gap-1 font-mono text-xs text-muted">
+                  <EyeOff className="size-3.5" /> blind test · listen and judge by ear
+                </p>
+              </div>
+              <Button
+                variant="subtle"
+                size="icon-sm"
+                onClick={togglePlay}
+                aria-label={playing ? `Pause ${label} preview` : `Play ${label} preview`}
+                aria-pressed={playing}
+                className={cn("shrink-0", playing && "ring-1 ring-win/60")}
+              >
+                {playing ? <Pause className="size-4" /> : <Play className="size-4 ml-0.5" />}
+              </Button>
             </div>
-            <Button
-              variant="subtle"
-              size="icon-sm"
-              onClick={togglePlay}
-              aria-label={playing ? `Pause ${label} preview` : `Play ${label} preview`}
-              aria-pressed={playing}
-              className={cn("shrink-0", playing && "ring-1 ring-win/60")}
-            >
-              {playing ? <Pause className="size-4" /> : <Play className="size-4 ml-0.5" />}
-            </Button>
-            <audio
-              ref={audioRef}
-              src={state.analysis.objectUrl}
-              data-slot={id}
-              preload="auto"
-              onEnded={handleStop}
-              onPause={handleStop}
-              onPlay={handlePlay}
-              onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
-              onLoadedMetadata={(e) => {
-                const d = e.currentTarget.duration;
-                if (Number.isFinite(d) && d > 0) setMediaDuration(d);
-              }}
-              onSeeked={(e) => setPosition(e.currentTarget.currentTime)}
-              onError={() => {
-                setPlaying(false);
-                setPlayError("Preview failed to load that file.");
-              }}
-            />
-          </div>
+          ) : (
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-fg" title={state.analysis.fileName}>
+                  {state.analysis.fileName}
+                </p>
+                <p className="mt-0.5 font-mono text-xs text-muted">
+                  {state.analysis.container.codec}
+                  {" · "}
+                  {formatBytes(state.analysis.fileSize)}
+                  {" · "}
+                  {formatDuration(state.analysis.durationSec)}
+                </p>
+              </div>
+              <Button
+                variant="subtle"
+                size="icon-sm"
+                onClick={togglePlay}
+                aria-label={playing ? `Pause ${label} preview` : `Play ${label} preview`}
+                aria-pressed={playing}
+                className={cn("shrink-0", playing && "ring-1 ring-win/60")}
+              >
+                {playing ? <Pause className="size-4" /> : <Play className="size-4 ml-0.5" />}
+              </Button>
+            </div>
+          )}
+          <audio
+            ref={audioRef}
+            src={state.analysis.objectUrl}
+            data-slot={id}
+            preload="auto"
+            onEnded={handleStop}
+            onPause={handleStop}
+            onPlay={handlePlay}
+            onTimeUpdate={(e) => handleTime(e.currentTarget.currentTime)}
+            onLoadedMetadata={(e) => {
+              const d = e.currentTarget.duration;
+              if (Number.isFinite(d) && d > 0) setMediaDuration(d);
+            }}
+            onSeeked={(e) => setPosition(e.currentTarget.currentTime)}
+            onError={() => {
+              setPlaying(false);
+              setPlayError("Preview failed to load that file.");
+            }}
+          />
           <SeekBar
             label={label}
             position={position}
@@ -352,44 +463,120 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
             </p>
           )}
 
-          <SpectrogramCanvas analysis={state.analysis} />
-
-          <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[360px]:grid-cols-2">
-            <Stat label="Spectral ceiling" value={formatHz(state.analysis.cutoffHz)} emphasize />
-            <Stat label="True class" value={QUALITY_LABEL[state.analysis.qualityClass]} />
-          </dl>
-          <details className="rounded-md border border-border px-3">
-            <summary className="min-h-11 cursor-pointer py-3 text-xs font-medium text-fg focus-visible:outline-2 focus-visible:outline-accent">
-              Analysis details · {label}
-            </summary>
-            {state.analysis.liteAnalysis && (
-              <p className="mb-3 text-xs leading-relaxed text-warn">
-                Lite analysis: this long file was analyzed from its loudest excerpts to stay within
-                memory limits.
+          {masked ? (
+            <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-md bg-bg-inset text-center sm:h-64">
+              <EyeOff className="size-5 text-faint" />
+              <p className="max-w-60 text-xs leading-relaxed text-muted">
+                Spectrogram and measurements are hidden for this round — reveal to see who kept
+                the air.
               </p>
-            )}
-            <dl className="grid grid-cols-1 gap-x-4 gap-y-3 pb-4 min-[360px]:grid-cols-2">
-              <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
-              <Stat
-                label="Header bitrate"
-                value={
-                  state.analysis.container.claimedKbps
-                    ? `${formatKbps(state.analysis.container.claimedKbps)}${state.analysis.container.vbr ? " VBR" : ""}`
-                    : "—"
-                }
-              />
-              <Stat label="Rolloff" value={ROLLOFF_LABEL[state.analysis.rolloff]} />
-              <Stat
-                label="Sample rate"
-                value={`${formatSampleRate(state.analysis.sampleRate)} · ${channelLabel(state.analysis.channels)}`}
-              />
-              <Stat
-                label="Peak / RMS"
-                value={`${formatDb(state.analysis.peakDb)} / ${formatDb(state.analysis.rmsDb)}`}
-              />
-              <Stat label="Crest" value={formatDb(state.analysis.crestDb)} />
-            </dl>
-          </details>
+            </div>
+          ) : (
+            <>
+              {scanState?.busy ? (
+                <div className="flex h-48 flex-col items-center justify-center gap-3 rounded-md bg-bg-inset sm:h-64">
+                  <Crosshair className="size-5 text-accent" />
+                  <p aria-live="polite" className="font-mono text-xs text-muted">
+                    {scanState.phase}
+                  </p>
+                  <div
+                    role="progressbar"
+                    aria-label={`Scanning excerpt at the playhead`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(scanState.progress * 100)}
+                    className="h-1 w-40 overflow-hidden rounded-full bg-bg-subtle"
+                  >
+                    <div
+                      className="h-full bg-accent"
+                      style={{ width: `${Math.round(scanState.progress * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <SpectrogramCanvas
+                  analysis={state.analysis}
+                  override={override}
+                  onResetOverride={onResetOverride}
+                />
+              )}
+              {onScan && (
+                <div className="flex items-center justify-between gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onScan(position)}
+                    disabled={Boolean(scanState?.busy)}
+                    aria-label={`Re-scan a ~12 s excerpt at the ${label} playhead (${formatDuration(position)})`}
+                  >
+                    <Crosshair className="size-4" />
+                    Re-scan at playhead ({formatDuration(position)})
+                  </Button>
+                </div>
+              )}
+
+              <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[360px]:grid-cols-2">
+                <Stat
+                  label="Spectral ceiling"
+                  value={formatHz(refinedCutoffHz ?? state.analysis.cutoffHz)}
+                  emphasize
+                  note={typeof refinedCutoffHz === "number" ? "shared window" : undefined}
+                />
+                <Stat
+                  label="True class"
+                  value={QUALITY_LABEL[refinedClass ?? state.analysis.qualityClass]}
+                  note={
+                    refinedClass && refinedClass !== state.analysis.qualityClass
+                      ? "judged on the shared window"
+                      : undefined
+                  }
+                />
+              </dl>
+              <details className="rounded-md border border-border px-3">
+                <summary className="min-h-11 cursor-pointer py-3 text-xs font-medium text-fg focus-visible:outline-2 focus-visible:outline-accent">
+                  Analysis details · {label}
+                </summary>
+                {state.analysis.liteAnalysis && (
+                  <p className="mb-3 text-xs leading-relaxed text-warn">
+                    Lite analysis: this long file was analyzed from its loudest excerpts to stay
+                    within memory limits.
+                  </p>
+                )}
+                <dl className="grid grid-cols-1 gap-x-4 gap-y-3 pb-4 min-[360px]:grid-cols-2">
+                  <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
+                  <Stat
+                    label="Header bitrate"
+                    value={
+                      state.analysis.container.claimedKbps
+                        ? `${formatKbps(state.analysis.container.claimedKbps)}${state.analysis.container.vbr ? " VBR" : ""}`
+                        : "—"
+                    }
+                  />
+                  <Stat
+                    label="Bit depth"
+                    value={bitDepthLabel(state.analysis)}
+                    note={
+                      state.analysis.effectiveBits != null &&
+                      typeof state.analysis.container.bitDepth === "number" &&
+                      state.analysis.effectiveBits < state.analysis.container.bitDepth
+                        ? "16-bit content padded into the bigger container"
+                        : undefined
+                    }
+                  />
+                  <Stat label="Rolloff" value={ROLLOFF_LABEL[state.analysis.rolloff]} />
+                  <Stat
+                    label="Sample rate"
+                    value={`${formatSampleRate(state.analysis.sampleRate)} · ${channelLabel(state.analysis.channels)}`}
+                  />
+                  <Stat
+                    label="Peak / RMS"
+                    value={`${formatDb(state.analysis.peakDb)} / ${formatDb(state.analysis.rmsDb)}`}
+                  />
+                  <Stat label="Crest" value={formatDb(state.analysis.crestDb)} />
+                </dl>
+              </details>
+            </>
+          )}
         </div>
       )}
 
@@ -409,6 +596,17 @@ export function FileSlot({ id, state, outcome, onFile, onClear, onRejectedDrop }
       />
     </section>
   );
+}
+
+/** Lossless bit depth line: container vs the integer grid the content sits on. */
+function bitDepthLabel(a: Analysis): string {
+  const bits = a.container.bitDepth;
+  const eff = a.effectiveBits;
+  if (bits == null) return "—";
+  if (typeof eff === "number" && eff < bits) {
+    return `${bits}-bit container · ${eff}-bit content`;
+  }
+  return `${bits}-bit`;
 }
 
 function SeekBar({
@@ -462,7 +660,17 @@ function SeekBar({
   );
 }
 
-function Stat({ label, value, emphasize }: { label: string; value: string; emphasize?: boolean }) {
+function Stat({
+  label,
+  value,
+  emphasize,
+  note,
+}: {
+  label: string;
+  value: string;
+  emphasize?: boolean;
+  note?: string;
+}) {
   return (
     <div>
       <dt className="text-xs tracking-wide text-faint uppercase">{label}</dt>
@@ -473,6 +681,7 @@ function Stat({ label, value, emphasize }: { label: string; value: string; empha
         )}
       >
         {value}
+        {note && <span className="ml-1.5 text-[10px] text-info normal-case">{note}</span>}
       </dd>
     </div>
   );

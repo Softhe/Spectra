@@ -2,6 +2,20 @@ import { fft, hann } from "./fft";
 import { sniffContainer } from "./sniff";
 import { cacheGet, cacheKeyForFile, cachePut } from "./cache";
 import { runDspParallel } from "./dsp-client";
+import {
+  ENVELOPE_BLOCK_SEC,
+  envelopeFromTaps,
+  songMatchOf,
+  type Envelope,
+  type SongMatch,
+} from "./align";
+import { bufferSource, type SliceSource } from "./source";
+import {
+  WavPcmSource,
+  wavContainerInfo,
+  wavMetaFromBlob,
+  type WavPcmMeta,
+} from "./wav-source";
 import type {
   Analysis,
   Comparison,
@@ -146,6 +160,13 @@ async function sanitizeNonFinite(buffer: AudioBuffer, signal?: AbortSignal): Pro
   }
 }
 
+/** Inline slice sanitize for mono mixes built outside decodeAudioData. */
+function sanitizeMonoSlice(mono: Float32Array): void {
+  for (let i = 0; i < mono.length; i++) {
+    if (!Number.isFinite(mono[i]!)) mono[i] = 0;
+  }
+}
+
 function stereoWidth(buffer: AudioBuffer): number {
   if (buffer.numberOfChannels < 2) return 0;
   const L = buffer.getChannelData(0);
@@ -164,106 +185,134 @@ function stereoWidth(buffer: AudioBuffer): number {
   return Math.min(1, side / (mid + EPS));
 }
 
-type Region = { start: number; end: number };
-
-/** Mean-square envelope at 0.5 s blocks, strided. Shared by ranking. */
-function envelopeBlocks(
-  length: number,
-  sampleRate: number,
-  tap: (i: number) => number,
-): { blockRms: Float32Array; nBlocks: number; block: number } {
-  const block = Math.max(1, Math.floor(0.5 * sampleRate));
-  const nBlocks = Math.max(1, Math.ceil(length / block));
-  const blockRms = new Float32Array(nBlocks);
-  const stride = Math.max(1, Math.floor(sampleRate / 4000)); // ~4000 taps/sec
-  for (let b = 0; b < nBlocks; b++) {
-    const s = b * block;
-    const e = Math.min(length, s + block);
-    let sumSq = 0;
-    let taps = 0;
-    for (let i = s; i < e; i += stride) {
-      const v = tap(i);
-      sumSq += v * v;
-      taps++;
+/**
+ * Effective bit depth: the integer grid the samples actually live on. A 24-bit
+ * container whose audio fits the 16-bit grid EXACTLY (zero-padding upconvert,
+ * the classic storefront repack) reads 16. deliberately strict: dithered
+ * masters (residual ~±0.5 LSB) report null rather than a false flag, so this
+ * can miss a dithered pad but never flags honest audio.
+ */
+export function bitGridCheck(samples: Float32Array): number | null {
+  const len = samples.length;
+  if (len < 1024) return null;
+  const step = Math.max(1, Math.floor(len / 500_000));
+  let used = 0;
+  for (const bits of [16, 20, 24] as const) {
+    const scale = 2 ** (bits - 1);
+    let worst = 0;
+    let counted = 0;
+    for (let i = 0; i < len; i += step) {
+      const v = samples[i]!;
+      counted++;
+      if (!Number.isFinite(v) || (v === 0 && used < 4)) {
+        // Leading all-zero headers: irrelevant either way.
+        continue;
+      }
+      used++;
+      const r = Math.abs(v * scale - Math.round(v * scale));
+      if (r > worst) worst = r;
     }
-    blockRms[b] = sumSq / Math.max(1, taps);
+    if (used < Math.max(64, counted * 0.01)) return null; // silence
+    if (worst <= 0.03) return bits;
   }
-  return { blockRms, nBlocks, block };
+  return null;
 }
 
-function rankWindows(
-  blockRms: Float32Array,
-  nBlocks: number,
-  block: number,
+function effectiveBitDepth(buffer: AudioBuffer): number | null {
+  return bitGridCheck(buffer.getChannelData(0));
+}
+
+type Region = { start: number; end: number };
+
+/** Loudness-ranked analysis windows on top of an envelope. */
+export function rankWindowsByEnvelope(
+  env: { power: Float32Array; blockSec: number } | Envelope,
   length: number,
+  sampleRate: number,
   win: number,
   keep: number,
 ): Region[] {
-  const clamp = (start: number): Region => {
-    const s = Math.max(0, Math.min(start, length - win));
+  const power = (env as Envelope).power;
+  const block = Math.max(1, Math.floor(env.blockSec * sampleRate));
+  const candidates = [0.08, 0.24, 0.4, 0.56, 0.72, 0.86].map((f) => {
+    const s = Math.max(0, Math.min(Math.floor(f * length), length - win));
     return { start: s, end: s + win };
-  };
+  });
   const windowScore = (start: number): number => {
-    const end = Math.min(nBlocks, Math.ceil((start + win) / block));
+    const end = Math.min(power.length, Math.ceil((start + win) / block));
     let sum = 0;
     let n = 0;
-    for (let b = Math.floor(start / block); b < end; b++) {
-      sum += blockRms[b]!;
+    for (let b = Math.floor(start / block); b < Math.max(0, end); b++) {
+      sum += power[b] ?? 0;
       n++;
     }
     return n ? sum / n : 0;
   };
-  const candidates = [0.08, 0.24, 0.4, 0.56, 0.72, 0.86].map((f) => clamp(Math.floor(f * length)));
   candidates.sort((x, y) => windowScore(y.start) - windowScore(x.start));
   const picked = candidates.slice(0, keep);
   picked.sort((x, y) => x.start - y.start);
   return picked;
 }
 
-export function pickRegions(samples: Float32Array, sampleRate: number): Region[] {
-  const length = samples.length;
+/** Long-file (and streaming WAV) window pick: loudest 4 of 6 candidates. */
+export function longRegions(env: Envelope, length: number, sampleRate: number): Region[] {
   const totalSec = length / sampleRate;
-  if (totalSec <= 8) return [{ start: 0, end: length }];
-
   const windowSec = Math.min(4, totalSec / 3);
   const win = Math.floor(windowSec * sampleRate);
-  const clamp = (start: number): Region => {
-    const s = Math.max(0, Math.min(start, length - win));
-    return { start: s, end: s + win };
-  };
-
-  // Short files: fixed fractions as before.
-  if (totalSec < 20) {
-    return [0.15, 0.5, 0.75].map((f) => clamp(Math.floor(f * length)));
-  }
-
-  // Long files: score 6 candidate windows by loudness, keep the loudest 4.
-  // A fade-out or silence landing in a fixed window used to dilute occupancy
-  // by 25%; loudness ranking makes that structurally impossible.
-  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, (i) => samples[i]!);
-  return rankWindows(blockRms, nBlocks, block, length, win, 4);
+  return rankWindowsByEnvelope(env, length, sampleRate, win, 4);
 }
 
-/** Region picking for very long files without materializing full mono. */
-export function pickRegionsFromBuffer(buffer: AudioBuffer): Region[] {
+export function scanRegions(
+  samples: Float32Array,
+  sampleRate: number,
+): { regions: Region[]; envelope: Envelope } {
+  const length = samples.length;
+  const totalSec = length / sampleRate;
+  const envelope = envelopeFromTaps(length, sampleRate, (i) => samples[i]!);
+  if (totalSec <= 8) return { regions: [{ start: 0, end: length }], envelope };
+  const win = windowLength(totalSec, sampleRate);
+  if (totalSec < 20) {
+    const clamp = (f: number) => Math.max(0, Math.min(Math.floor(f * length), length - win));
+    return { regions: [0.15, 0.5, 0.75].map((f) => ({ start: clamp(f), end: clamp(f) + win })), envelope };
+  }
+  return { regions: longRegions(envelope, length, sampleRate), envelope };
+}
+
+export function pickRegions(samples: Float32Array, sampleRate: number): Region[] {
+  return scanRegions(samples, sampleRate).regions;
+}
+
+export function scanRegionsFromBuffer(buffer: AudioBuffer): { regions: Region[]; envelope: Envelope } {
   const length = buffer.length;
   const sampleRate = buffer.sampleRate;
   const totalSec = length / sampleRate;
-  const windowSec = Math.min(4, totalSec / 3);
-  const win = Math.floor(windowSec * sampleRate);
-  // Tap the channel mean, matching pickRegions' mono mixdown: ranking on
-  // channel 0 alone misranks windows over hard-panned material whose left
-  // channel goes quiet where the mix is loud. Strided taps keep this cheap.
+  // Tap the channel mean, matching the mono pickRegions path exactly: ranking
+  // on channel 0 alone misranks windows over hard-panned material whose left
+  // channel goes quiet where the mix is loud.
   const chs: Float32Array[] = [];
   for (let c = 0; c < buffer.numberOfChannels; c++) chs.push(buffer.getChannelData(c));
   const scale = 1 / Math.max(1, chs.length);
-  const { blockRms, nBlocks, block } = envelopeBlocks(length, sampleRate, (i) => {
+  const envelope = envelopeFromTaps(length, sampleRate, (i) => {
     if (chs.length === 1) return chs[0]![i]!;
     let v = 0;
     for (let c = 0; c < chs.length; c++) v += chs[c]![i]!;
     return v * scale;
   });
-  return rankWindows(blockRms, nBlocks, block, length, win, 4);
+  if (totalSec <= 8) return { regions: [{ start: 0, end: length }], envelope };
+  const win = windowLength(totalSec, sampleRate);
+  if (totalSec < 20) {
+    const clamp = (f: number) => Math.max(0, Math.min(Math.floor(f * length), length - win));
+    return { regions: [0.15, 0.5, 0.75].map((f) => ({ start: clamp(f), end: clamp(f) + win })), envelope };
+  }
+  return { regions: longRegions(envelope, length, sampleRate), envelope };
+}
+
+export function pickRegionsFromBuffer(buffer: AudioBuffer): Region[] {
+  return scanRegionsFromBuffer(buffer).regions;
+}
+
+function windowLength(totalSec: number, sampleRate: number): number {
+  return Math.floor(Math.min(4, totalSec / 3) * sampleRate);
 }
 
 export function excerptRegion(length: number, sampleRate: number): Region {
@@ -574,7 +623,7 @@ export async function detectCutoff(
    * Window on the precise halfway crossing: [edge − 700, edge + max(40 Hz,
    * 1.5 bins)]. Above: a cliff past the edge proves content the source can't
    * have had (a 22.1 kHz cut is not a 44.1 kHz source), so the tolerance is
-   * just bin quantization. Below: measured on full-band 44.1 kHz noise put
+   * just bin quantization.Below: measured on full-band 44.1 kHz noise put
    * through Kaiser windowed-sinc 44.1→48 kHz resamplers, the crossing lands
    * at 21.49–22.08 kHz for cutoffs 0.95–0.99·Nyquist (32–128 taps/side);
    * softer resamplers (≤ 0.94·Nyquist, e.g. 0.9 with 16 taps) land at
@@ -901,7 +950,7 @@ function decodeBuffer(
   });
 }
 
-async function decodeNative(
+export async function decodeNative(
   buffer: ArrayBuffer,
   sampleRateHint: number | null,
 ): Promise<AudioBuffer> {
@@ -1069,6 +1118,381 @@ export async function runDsp(
   };
 }
 
+/**
+ * Mix the analysis windows + display excerpt of any SliceSource into one
+ * concatenated mono buffer with local spans, exactly the layout runDsp's Lite
+ * path consumes. The excerpt's true wall-clock position travels through
+ * `excerptStartSec` so the spectrogram axis lands on real song positions.
+ */
+export async function sliceMono(
+  source: SliceSource,
+  regions: Region[],
+  excerpt: Region,
+  signal?: AbortSignal,
+): Promise<{ mono: Float32Array; spans: DspSpans }> {
+  const parts: Float32Array[] = [];
+  const localRegions: Region[] = [];
+  let off = 0;
+  for (let i = 0; i < regions.length; i++) {
+    const slice = await mixSlice(source, regions[i]!, signal);
+    localRegions.push({ start: off, end: off + slice.length });
+    parts.push(slice);
+    off += slice.length;
+    await yieldToMain();
+    throwIfAborted(signal);
+  }
+  const em = await mixSlice(source, excerpt, signal);
+  const localExcerpt = { start: off, end: off + em.length };
+  parts.push(em);
+  off += em.length;
+  const mono = new Float32Array(off);
+  let p = 0;
+  for (const part of parts) {
+    mono.set(part, p);
+    p += part.length;
+  }
+  sanitizeMonoSlice(mono);
+  return { mono, spans: { regions: localRegions, excerpt: localExcerpt } };
+}
+
+async function mixSlice(
+  source: SliceSource,
+  r: Region,
+  signal?: AbortSignal,
+): Promise<Float32Array> {
+  throwIfAborted(signal);
+  const channels = await source.sliceChannels(r.start, r.end);
+  const len = Math.min(...channels.map((c) => c.length));
+  if (len <= 0) return new Float32Array(0);
+  if (channels.length === 1) {
+    const out = new Float32Array(len);
+    out.set(channels[0]!.subarray(0, len));
+    return out;
+  }
+  const out = new Float32Array(len);
+  const scale = 1 / channels.length;
+  for (let i = 0; i < len; i++) {
+    let v = 0;
+    for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
+    out[i] = v * scale;
+  }
+  return out;
+}
+
+export type SourceStats = {
+  peakDb: number;
+  rmsDb: number;
+  crestDb: number;
+  clipFraction: number;
+  stereoWidth: number;
+  envelope: Envelope;
+};
+
+/**
+ * One sequential pass over any SliceSource measuring peak/RMS, sustained
+ * clipping, stereo width (strided, global-anchored like stereoWidth()) and
+ * the loudness envelope (block-anchored strided, like envelopeFromTaps).
+ * This is the lite-path-equivalent of mixDownWithStats + pickRegionsFromBuffer
+ * + stereoWidth, unified so WAV files too big for decodeAudioData still get
+ * every measurement — bounded memory, never a materialized full mono.
+ */
+export async function scanSourceStats(
+  source: SliceSource,
+  onProgress?: (p: number) => void,
+  signal?: AbortSignal,
+): Promise<SourceStats> {
+  throwIfAborted(signal);
+  const { sampleRate, length } = source;
+  if (length < 256) throw new Error("That file is too short to analyze.");
+  const ch = source.numberOfChannels;
+  const block = Math.max(1, Math.floor(ENVELOPE_BLOCK_SEC * sampleRate));
+  const nBlocks = Math.max(1, Math.ceil(length / block));
+  const power = new Float32Array(nBlocks);
+  const blockTaps = new Uint32Array(nBlocks);
+  const strideEnv = Math.max(1, Math.floor(sampleRate / 4000));
+  const strideWidth = Math.max(1, Math.floor(length / 250_000));
+
+  let peak = 0;
+  let sumSq = 0;
+  let run = 0;
+  let clipRun = 0;
+  let mid = 0;
+  let side = 0;
+  const CHUNK = 1 << 19; // ~2 MB per channel per chunk — small blob reads
+  const scale = 1 / Math.max(1, ch);
+
+  for (let s = 0; s < length; s += CHUNK) {
+    const end = Math.min(length, s + CHUNK);
+    const channels = await source.sliceChannels(s, end);
+    const len = Math.max(0, end - s);
+    for (let i = 0; i < len; i++) {
+      let v = 0;
+      for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
+      v *= scale;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+      sumSq += v * v;
+      if (a >= 0.999) run++;
+      else {
+        if (run >= 16) clipRun += run;
+        run = 0;
+      }
+      const gi = s + i;
+      const b = Math.floor(gi / block);
+      // Block-anchored stride, matching envelopeFromTaps' tap positions.
+      if ((gi - b * block) % strideEnv === 0) {
+        power[b]! += v * v;
+        blockTaps[b]++;
+      }
+      if (ch >= 2 && strideWidth > 1 ? gi % strideWidth === 0 : ch >= 2) {
+        // Stereo width tap (strided like stereoWidth()).
+        if (ch >= 2) {
+          const L = channels[0]![i]!;
+          const R = channels[1]![i]!;
+          const m = 0.5 * (L + R);
+          const sd = 0.5 * (L - R);
+          mid += m * m;
+          side += sd * sd;
+        }
+      }
+    }
+    onProgress?.((s + CHUNK) / length);
+    await yieldToMain();
+    throwIfAborted(signal);
+  }
+  if (run >= 16) clipRun += run;
+
+  for (let b = 0; b < nBlocks; b++) {
+    power[b] = blockTaps[b]! > 0 ? power[b]! / blockTaps[b]! : 0;
+  }
+  const envelope: Envelope = { blockSec: ENVELOPE_BLOCK_SEC, power };
+
+  let stereoWidth = 0;
+  if (ch >= 2) {
+    // Count nothing when the whole file is DC silence.
+    if (mid + side < EPS) stereoWidth = 0;
+    else stereoWidth = Math.min(1, side / (mid + EPS));
+  }
+
+  const rms = Math.sqrt(sumSq / Math.max(1, length));
+  const peakDb = 20 * Math.log10(peak + EPS);
+  return {
+    peakDb,
+    rmsDb: 20 * Math.log10(rms + EPS),
+    crestDb: peakDb - (20 * Math.log10(rms + EPS)),
+    clipFraction: clipRun / Math.max(1, length),
+    stereoWidth,
+    envelope,
+  };
+}
+
+/**
+ * Excerpt re-scan: decode (or slice, for WAV) only a ~12 s window at `seekSec`
+ * and build a spectrogram from it. Heavy on big files, so it is strictly
+ * user-initiated and wrapped in the serial queue by the caller.
+ */
+export async function scanExcerpt(
+  blob: Blob,
+  hintRate: number | null,
+  seekSec: number,
+  onProgress?: (status: string, amount: number) => void,
+  signal?: AbortSignal,
+): Promise<SpectrogramData> {
+  throwIfAborted(signal);
+  onProgress?.("Reading", 0.05);
+  const wav = await wavMetaFromBlob(blob).catch(() => null);
+  const startSec = Math.max(0, seekSec);
+  const sanitize = (mono: Float32Array) => sanitizeMonoSlice(mono);
+
+  if (wav) {
+    // Bounded path: no full decode — the exact PCM frames are read from disk.
+    onProgress?.("Scanning", 0.25);
+    const source = new WavPcmSource(blob, wav);
+    const span = Math.min(12, wav.frameCount / wav.sampleRate);
+    const start = Math.max(
+      0,
+      Math.min(Math.floor(startSec * wav.sampleRate), wav.frameCount - Math.floor(span * wav.sampleRate)),
+    );
+    const end = Math.min(wav.frameCount, start + Math.floor(span * wav.sampleRate));
+    const channels = await source.sliceChannels(start, end);
+    const len = Math.min(...channels.map((c) => c.length));
+    const mono = new Float32Array(Math.max(0, len));
+    const scale = 1 / Math.max(1, channels.length);
+    for (let i = 0; i < mono.length; i++) {
+      let v = 0;
+      for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
+      mono[i] = v * scale;
+    }
+    sanitize(mono);
+    const { magDb } = await stftPower(
+      mono,
+      0,
+      mono.length,
+      (p) => onProgress?.("Scanning", 0.3 + 0.6 * p),
+      signal,
+    );
+    onProgress?.("Done", 1);
+    return resampleFramesToDisplay(
+      magDb,
+      wav.sampleRate,
+      start / wav.sampleRate,
+      mono.length / wav.sampleRate,
+    );
+  }
+
+  const bytes = await blob.arrayBuffer();
+  throwIfAborted(signal);
+  onProgress?.("Decoding", 0.2);
+  const buffer = await decodeNative(bytes, hintRate);
+  throwIfAborted(signal);
+  if (buffer.length < 256 || buffer.duration < 0.15) {
+    throw new Error("That file is too short to scan.");
+  }
+  const durSec = Math.min(12, buffer.duration);
+  const start = Math.max(
+    0,
+    Math.min(Math.floor(startSec * buffer.sampleRate), buffer.length - Math.floor(durSec * buffer.sampleRate)),
+  );
+  const end = Math.min(buffer.length, start + Math.floor(durSec * buffer.sampleRate));
+  if (end - start < 256) throw new Error("That position is past the end of the file.");
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
+  const scale = 1 / Math.max(1, channels.length);
+  const mono = new Float32Array(end - start);
+  for (let i = 0; i < mono.length; i++) {
+    let v = 0;
+    for (let c = 0; c < channels.length; c++) v += channels[c]![start + i]!;
+    mono[i] = v * scale;
+  }
+  sanitize(mono);
+  onProgress?.("Scanning", 0.5);
+  const { magDb } = await stftPower(
+    mono,
+    0,
+    mono.length,
+    (p) => onProgress?.("Scanning", 0.5 + 0.45 * p),
+    signal,
+  );
+  onProgress?.("Done", 1);
+  return resampleFramesToDisplay(magDb, buffer.sampleRate, start / buffer.sampleRate, mono.length / buffer.sampleRate);
+}
+
+/**
+ * File too big for decodeAudioData — name the right remedy by codec family.
+ * (WAV never reaches this: over-cap WAVs stream through analyzeStreamingWav.)
+ */
+function oversizeMessage(codec: string): string {
+  if (/MP3|AAC|Opus|Vorbis|FLAC|ALAC|CAF|AIFF|PCM/i.test(codec)) {
+    return (
+      "That file is too large to analyze in a browser in one piece. " +
+      "Try a FLAC copy, lower sample-rate/bit-depth conversion, or split a long rip into parts."
+    );
+  }
+  return "That file is too large to analyze in a browser. Try a smaller copy (e.g. FLAC instead of WAV).";
+}
+
+async function analyzeStreamingWav(
+  file: File,
+  meta: WavPcmMeta,
+  key: string | null,
+  onProgress?: (phase: string, amount: number) => void,
+  signal?: AbortSignal,
+): Promise<Analysis> {
+  const source = new WavPcmSource(file, meta);
+  const sampleRate = meta.sampleRate;
+  const durationSec = meta.frameCount / sampleRate;
+  if (durationSec < 0.15) throw new Error("That file is too short to analyze.");
+
+  onProgress?.("Measuring", 0.1);
+  const stats = await scanSourceStats(
+    source,
+    (p) => onProgress?.("Measuring", 0.1 + 0.2 * p),
+    signal,
+  );
+
+  // Same pipeline as the >15 min Lite path: loudest windows from the
+  // envelope + a display excerpt, sliced and concatenated, DSP over spans.
+  const regions = longRegions(stats.envelope, source.length, sampleRate);
+  const excerpt = excerptRegion(source.length, sampleRate);
+  onProgress?.("Measuring", 0.32);
+  const { mono, spans } = await sliceMono(source, regions, excerpt, signal);
+  onProgress?.("Spectrum", 0.35);
+
+  const dsp = await runDspParallel(
+    mono,
+    sampleRate,
+    stats.clipFraction,
+    onProgress,
+    {
+      ...spans,
+      excerptStartSec: excerpt.start / sampleRate,
+      excerptDurSec: (excerpt.end - excerpt.start) / sampleRate,
+    },
+    signal,
+    { rateConfirmed: true },
+  );
+
+  // 16-bit-in-24-bit pad check from cheap slices away from the song's head.
+  let effectiveBits: number | null = null;
+  if (!meta.float) {
+    try {
+      const probeSpan = Math.min(60_000, Math.floor(meta.frameCount * 0.5));
+      const probeStart = Math.floor(meta.frameCount * 0.25);
+      const channels = await source.sliceChannels(probeStart, probeStart + probeSpan);
+      effectiveBits = channels[0] ? bitGridCheck(channels[0]!) : null;
+      // When the padding claim matters, also probe the first track region
+      // (a mid-song pad is the common store pattern; head probes catch the rest).
+      if (effectiveBits === null) {
+        const head = await source.sliceChannels(0, Math.min(60_000, meta.frameCount));
+        effectiveBits = head[0] ? bitGridCheck(head[0]!) : null;
+      }
+    } catch {
+      effectiveBits = null; // best-effort
+    }
+  }
+
+  const containerKbps = durationSec > 0 ? (meta.dataLen * 8) / durationSec / 1000 : 0;
+  onProgress?.("Done", 1);
+
+  const analysis: Analysis = {
+    id: `${file.name}-${file.size}-${file.lastModified}`,
+    fileName: file.name,
+    fileSize: file.size,
+    mimeType: file.type,
+    objectUrl: URL.createObjectURL(file),
+    durationSec,
+    sampleRate,
+    channels: meta.channels,
+    container: wavContainerInfo(meta, durationSec),
+    containerKbps,
+    cutoffHz: dsp.cutoffHz,
+    nyquistHz: dsp.nyquistHz,
+    rolloff: dsp.rolloff,
+    brickwallHz: dsp.brickwallHz,
+    qualityClass: dsp.qualityClass,
+    score: dsp.score,
+    scoreParts: dsp.scoreParts,
+    sourceLimited: dsp.sourceLimited,
+    liteAnalysis: true,
+    cacheKey: key,
+    decode: { rateConfirmed: true, sourceRateHint: null },
+    envelope: stats.envelope,
+    effectiveBits,
+    peakDb: stats.peakDb,
+    rmsDb: stats.rmsDb,
+    crestDb: stats.crestDb,
+    clipFraction: stats.clipFraction,
+    stereoWidth: stats.stereoWidth,
+    hfOccupancy: dsp.hfOccupancy,
+    hfSlope: dsp.hfSlope,
+    meanDb: dsp.meanDb,
+    meanDbHzPerBin: dsp.meanDbHzPerBin,
+    spectrogram: dsp.spectrogram,
+  };
+  if (key) void cachePut(key, analysis);
+  return analysis;
+}
+
 export async function analyzeFile(
   file: File,
   onProgress?: (phase: string, amount: number) => void,
@@ -1082,16 +1506,12 @@ export async function analyzeFile(
   // devices, which OOM on far less). Fail loudly instead.
   // Memory-constrained devices get a tighter bound: a 200 MB compressed
   // file is already >1 GB of decoded float on lossless input.
+  // WAV is exempt: it streams through analyzeStreamingWav instead.
   const lowMemory =
     typeof navigator !== "undefined" &&
     typeof (navigator as Navigator & { deviceMemory?: number }).deviceMemory === "number" &&
     (navigator as Navigator & { deviceMemory?: number }).deviceMemory! <= 4;
   const maxBytes = lowMemory ? 200 * 1024 * 1024 : 600 * 1024 * 1024;
-  if (file.size > maxBytes) {
-    throw new Error(
-      "That file is too large to analyze in a browser. Try a smaller copy (e.g. FLAC instead of WAV).",
-    );
-  }
 
   // Result cache: identical bytes skip decode + DSP entirely.
   const key = await cacheKeyForFile(file);
@@ -1112,9 +1532,22 @@ export async function analyzeFile(
     }
   }
 
+  // Structural WAV check (cheap header reads) decides the streaming path
+  // before any full-file read. Failure/corruption falls straight through.
+  let wavMeta: WavPcmMeta | null = null;
+  if (file.size > maxBytes) {
+    wavMeta = await wavMetaFromBlob(file).catch(() => null);
+  }
+  if (wavMeta) {
+    return analyzeStreamingWav(file, wavMeta, key, onProgress, signal);
+  }
+
   const arrayBuffer = await file.arrayBuffer();
   throwIfAborted(signal);
   const container = sniffContainer(arrayBuffer, file.name, file.type);
+  if (file.size > maxBytes) {
+    throw new Error(oversizeMessage(container.codec));
+  }
 
   onProgress?.("Decoding", 0.12);
   let audio: AudioBuffer;
@@ -1143,78 +1576,71 @@ export async function analyzeFile(
 
   onProgress?.("Measuring", 0.28);
   throwIfAborted(signal);
-  const width = stereoWidth(audio);
 
   // Files over ~15 min would need 600 MB+ of float buffers; analyze slices
   // (loudest windows + display excerpt) instead and say so in the UI.
   const LONG_SEC = 15 * 60;
-  let mono: Float32Array;
-  let loud: { peakDb: number; rmsDb: number; crestDb: number; clipFraction: number };
-  let spans: DspSpans | undefined;
   let liteAnalysis = false;
+  let loud: { peakDb: number; rmsDb: number; crestDb: number; clipFraction: number; stereoWidth: number; envelope?: Envelope };
+  let dsp: DspResult;
   if (audio.duration > LONG_SEC) {
     liteAnalysis = true;
-    const stats = await mixDownWithStats(audio, false, signal);
-    loud = stats;
-    throwIfAborted(signal);
-    const regions = pickRegionsFromBuffer(audio);
+    // One bounded pass: peak/RMS/clip/width + envelope (the old path did
+    // this as three separate scans over the whole buffer).
+    const stats = await scanSourceStats(
+      bufferSource(audio),
+      (p) => onProgress?.("Measuring", 0.28 + 0.04 * p),
+      signal,
+    );
+    const regions = longRegions(stats.envelope, audio.length, audio.sampleRate);
     const excerpt = excerptRegion(audio.length, audio.sampleRate);
-    const chs: Float32Array[] = [];
-    for (let c = 0; c < audio.numberOfChannels; c++) chs.push(audio.getChannelData(c));
-    const scale = 1 / Math.max(1, chs.length);
-    const mixSlice = (s: number, e: number): Float32Array => {
-      const m = new Float32Array(Math.max(0, e - s));
-      for (let i = 0; i < m.length; i++) {
-        let v = 0;
-        for (let c = 0; c < chs.length; c++) v += chs[c]![s + i]!;
-        m[i] = v * scale;
-      }
-      return m;
-    };
-    const parts: Float32Array[] = [];
-    const localRegions: Region[] = [];
-    let off = 0;
-    for (const r of regions) {
-      const m = mixSlice(r.start, r.end);
-      localRegions.push({ start: off, end: off + m.length });
-      parts.push(m);
-      off += m.length;
-    }
-    const em = mixSlice(excerpt.start, excerpt.end);
-    const localExcerpt = { start: off, end: off + em.length };
-    parts.push(em);
-    off += em.length;
-    mono = new Float32Array(off);
-    let p = 0;
-    for (const part of parts) {
-      mono.set(part, p);
-      p += part.length;
-    }
-    // The display buffer is a concatenation, so its local offsets say nothing
-    // about where the spectrogram excerpt lives in the song — pass the true
-    // wall-clock position for the time axis.
-    spans = {
-      regions: localRegions,
-      excerpt: localExcerpt,
-      excerptStartSec: excerpt.start / audio.sampleRate,
-      excerptDurSec: (excerpt.end - excerpt.start) / audio.sampleRate,
-    };
+    onProgress?.("Measuring", 0.32);
+    const sliced = await sliceMono(bufferSource(audio), regions, excerpt, signal);
+    dsp = await runDspParallel(
+      sliced.mono,
+      audio.sampleRate,
+      stats.clipFraction,
+      onProgress,
+      {
+        ...sliced.spans,
+        excerptStartSec: excerpt.start / audio.sampleRate,
+        excerptDurSec: (excerpt.end - excerpt.start) / audio.sampleRate,
+      },
+      signal,
+      dspOptions,
+    );
+    loud = { ...stats };
   } else {
     const full = await mixDownWithStats(audio, true, signal);
-    mono = full.mono;
-    loud = full;
+    dsp = await runDspParallel(
+      full.mono,
+      audio.sampleRate,
+      full.clipFraction,
+      onProgress,
+      undefined,
+      signal,
+      dspOptions,
+    );
+    loud = {
+      peakDb: full.peakDb,
+      rmsDb: full.rmsDb,
+      crestDb: full.crestDb,
+      clipFraction: full.clipFraction,
+      stereoWidth: stereoWidth(audio),
+      // Verification envelope: block-anchored strided, same math as the
+      // lite path's, over the already-materialized mono.
+      envelope: envelopeFromTaps(audio.length, audio.sampleRate, (i) => full.mono[i]!),
+    };
   }
   throwIfAborted(signal);
 
-  const dsp = await runDspParallel(
-    mono,
-    audio.sampleRate,
-    loud.clipFraction,
-    onProgress,
-    spans,
-    signal,
-    dspOptions,
-  );
+  const isFloatContainer = /PCM float/i.test(container.codec);
+  const losslessContainer =
+    /FLAC|ALAC|WAV|AIFF|CAF|PCM/i.test(container.codec) &&
+    container.bitDepth !== null &&
+    container.bitDepth > 16 &&
+    !isFloatContainer;
+  const effectiveBits = losslessContainer ? effectiveBitDepth(audio) : null;
 
   const containerKbps = audio.duration > 0 ? (file.size * 8) / audio.duration / 1000 : 0;
 
@@ -1245,11 +1671,14 @@ export async function analyzeFile(
     sourceLimited: dsp.sourceLimited,
     liteAnalysis,
     cacheKey: key,
+    decode: { rateConfirmed, sourceRateHint: container.sampleRate },
+    envelope: loud.envelope,
+    effectiveBits,
     peakDb: loud.peakDb,
     rmsDb: loud.rmsDb,
     crestDb: loud.crestDb,
     clipFraction: loud.clipFraction,
-    stereoWidth: width,
+    stereoWidth: loud.stereoWidth,
     hfOccupancy: dsp.hfOccupancy,
     hfSlope: dsp.hfSlope,
     meanDb: dsp.meanDb,
@@ -1261,11 +1690,20 @@ export async function analyzeFile(
   return analysis;
 }
 
-export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
+export function compareAnalyses(
+  a: ComparisonMetrics,
+  b: ComparisonMetrics,
+): Comparison {
   const cutoffDeltaHz = a.cutoffHz - b.cutoffHz;
   const absDelta = Math.abs(cutoffDeltaHz);
   const scoreDelta = a.score - b.score;
   const sameLength = Math.abs(a.durationSec - b.durationSec) < 2.5;
+
+  // Same-song verification: cheap, done on the loudness envelopes.
+  const songMatch: SongMatch | null =
+    a.envelope && b.envelope ? songMatchOf(a.envelope, b.envelope) : null;
+  const different = songMatch?.status === "different";
+  const uncertain = songMatch?.status === "uncertain";
 
   let winner: SlotId | "tie" = "tie";
   // A win needs real bandwidth separation (~900 Hz — above the ~250 Hz
@@ -1282,6 +1720,9 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
   } else if (Math.abs(scoreDelta) >= 8) {
     winner = scoreDelta > 0 ? "a" : "b";
   }
+  // Two different recordings fighting for a winner is meaningless: the
+  // verdict becomes a guarded tie and the copy explains why.
+  if (different) winner = "tie";
 
   let confidence: Comparison["confidence"] = "low";
   if (absDelta >= 2500 || Math.abs(scoreDelta) >= 15) confidence = "high";
@@ -1289,6 +1730,9 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
   // Strongly contradictory evidence caps confidence: a big bandwidth gap
   // means less when the composite score firmly disagrees, and vice versa.
   if (scoreOpposes && confidence === "high") confidence = "medium";
+  // Unverified identity can't be "high" confidence about *which copy* wins —
+  // the user may be comparing two different songs entirely.
+  if (uncertain && confidence === "high") confidence = "medium";
 
   const better = winner === "tie" ? a : winner === "a" ? a : b;
   const worse = winner === "tie" ? b : winner === "a" ? b : a;
@@ -1297,6 +1741,26 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
 
   const fmtK = (hz: number) =>
     hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.round(hz)} Hz`;
+  const truncName = (name: string) =>
+    name.length > 44 ? `${name.slice(0, 41)}…` : name;
+
+  if (different) {
+    const detail =
+      `The loudness profiles of the two files line up only weakly ` +
+      `(r=${Math.max(0, (songMatch?.correlation ?? 0) * 100).toFixed(0)}%; two copies of one ` +
+      `recording typically share 90%+). Most likely these are not the same song ` +
+      `(or one is an edit/re-edit so different it misdates the comparison) — ` +
+      `no winner is declared.`;
+    return {
+      winner: "tie",
+      confidence: "low",
+      headline: "Hold on — these may not be the same song",
+      detail,
+      cutoffDeltaHz,
+      sameLength,
+      songMatch: songMatch!,
+    };
+  }
 
   if (winner === "tie") {
     const sourceNote =
@@ -1305,10 +1769,13 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
         : "";
     // When the ceilings visibly differ, say so with both numbers — "both
     // reach about X" is a lie the spectrogram immediately contradicts.
-    const detail =
+    let detail =
       absDelta >= 500
         ? `File A reaches ${fmtK(a.cutoffHz)} and File B ${fmtK(b.cutoffHz)}, but the quality scores land together (${a.score.toFixed(0)} vs ${b.score.toFixed(0)}) — so neither copy is clearly better overall. Trust the A/B preview below over either number.${sourceNote}`
         : `Both reach about ${fmtK(a.cutoffHz)}. If they sound different, it is more likely loudness or stereo width than bandwidth.${sourceNote}`;
+    if (uncertain) {
+      detail += ` Timing similarity is only ${Math.round((songMatch?.correlation ?? 0) * 100)}% — double-check these are the same recording.`;
+    }
     return {
       winner,
       confidence,
@@ -1316,6 +1783,7 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
       detail,
       cutoffDeltaHz,
       sameLength,
+      songMatch: songMatch ?? undefined,
     };
   }
 
@@ -1353,17 +1821,54 @@ export function compareAnalyses(a: Analysis, b: Analysis): Comparison {
       ? ` The header says ${claimed} kbps, but the spectrum behaves like a much lower-rate encode.`
       : "";
 
-  const lengthNote = sameLength ? "" : " Lengths differ, so double-check these are the same song.";
+  // 16-bit audio padded into a bigger lossless container: the header's bit
+  // depth is real, the content is not. Only strict grid fits get flagged
+  // (dithered masters read null both sides — see bitGridCheck).
+  const padNote = (side: ComparisonMetrics, slot: string): string => {
+    const bits = side.container.bitDepth;
+    const eff = side.effectiveBits;
+    const lossless = /FLAC|ALAC|WAV|AIFF|CAF|PCM/i.test(side.container.codec) && !/PCM float/i.test(side.container.codec);
+    if (!lossless || bits === null || typeof eff !== "number" || bits <= eff) return "";
+    return ` File ${slot} stores ${eff}-bit audio in a ${bits}-bit ${side.container.codec} container — the label's bigger number carries nothing real.`;
+  };
+  const padding = padNote(worse, worseSlot) + (a.effectiveBits !== b.effectiveBits ? padNote(a, "A") + padNote(b, "B") : "");
+
+  // With verified alignment, differing lengths are just trims/different
+  // masters — the offset is measured and handled, not a same-song doubt.
+  const lengthNote =
+    songMatch?.status === "same" && Math.abs(songMatch.lagSec) >= 1
+      ? ` The copies sit ~${Math.abs(songMatch.lagSec).toFixed(1)} s apart in time (trimmed differently); previews align to the same musical position.`
+      : sameLength
+        ? ""
+        : " Lengths differ, so double-check these are the same song.";
 
   return {
     winner,
     confidence,
-    headline: `Winner: File ${betterSlot} — the higher-quality copy`,
-    detail: `${bandwidth}${wall}${mismatch}${lengthNote}`,
+    headline: `Winner: File ${betterSlot} — “${truncName(a === better ? a.fileName : b.fileName)}”`,
+    detail: `${bandwidth}${wall}${mismatch}${padding}${lengthNote}`,
     cutoffDeltaHz,
     sameLength,
+    songMatch: songMatch ?? undefined,
   };
 }
+
+/** The fields compareAnalyses reads. Full Analysis satisfies it; refined
+ *  comparison views also pass (they patch the measured subset). */
+export type ComparisonMetrics = Pick<
+  Analysis,
+  | "fileName"
+  | "durationSec"
+  | "cutoffHz"
+  | "rolloff"
+  | "qualityClass"
+  | "score"
+  | "sourceLimited"
+  | "container"
+  | "containerKbps"
+  | "envelope"
+  | "effectiveBits"
+>;
 
 export const QUALITY_LABEL: Record<QualityClass, string> = {
   lossless: "Lossless class",
