@@ -25,6 +25,12 @@ const musicish = (n: number): Envelope =>
   });
 
 describe("envelopeFromMono", () => {
+  it("does not call silent or constant recordings different", () => {
+    for (const value of [0, 0.5]) {
+      const env = blocks(160, () => value);
+      assert.equal(songMatchOf(env, env).status, "uncertain");
+    }
+  });
   it("averages mean-square power per 0.125 s block", () => {
     // 8000 Hz → 1000 samples per block. Blocks 0,1: flat 0.5 and 1.
     const mono = new Float32Array(2000);
@@ -76,7 +82,11 @@ describe("testLag (lag direction: A[i] pairs with B[i - lag])", () => {
 
   it("returns corr -1 when the overlap is under 10 s", () => {
     const a = musicish(80); // 10 s
-    const r = testLag(a, blocks(80, () => 1), 20); // 60 blocks = 7.5 s overlap
+    const r = testLag(
+      a,
+      blocks(80, () => 1),
+      20,
+    ); // 60 blocks = 7.5 s overlap
     assert.equal(r.corr, -1);
   });
 });
@@ -105,7 +115,10 @@ describe("alignEnvelopes", () => {
 describe("songMatchOf", () => {
   it("verifies identical takes as same with lag 0", () => {
     const a = musicish(400); // 50 s
-    const m = songMatchOf(a, blocks(400, (i) => a.power[i]!));
+    const m = songMatchOf(
+      a,
+      blocks(400, (i) => a.power[i]!),
+    );
     assert.equal(m.status, "same");
     assert.equal(m.lagSec, 0);
     assert.ok(m.correlation > 0.999);
@@ -139,7 +152,10 @@ describe("songMatchOf", () => {
 
   it("returns uncertain — not different — when the shared timeline is under 12 s", () => {
     const a = musicish(90); // 11.25 s
-    const m = songMatchOf(a, blocks(90, (i) => a.power[i]!));
+    const m = songMatchOf(
+      a,
+      blocks(90, (i) => a.power[i]!),
+    );
     assert.equal(m.status, "uncertain");
     assert.ok(m.overlapSec < 12);
   });
@@ -148,7 +164,8 @@ describe("songMatchOf", () => {
     // A: 120 s song. B: a 30 s preview cut from 60 s in — 4× shorter, and
     // the lag (60 s) is far outside the ±30 s trim search for equal lengths.
     const a = blocks(960, (i) => {
-      const s = Math.sin(i / 23) * 0.4 + Math.sin(i / 7 + 1.3) * 0.3 + Math.sin(i / 3.1) * 0.2 + 0.9;
+      const s =
+        Math.sin(i / 23) * 0.4 + Math.sin(i / 7 + 1.3) * 0.3 + Math.sin(i / 3.1) * 0.2 + 0.9;
       return s * s;
     });
     const start = 480;

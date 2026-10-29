@@ -5,6 +5,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import {
+  analyzeFile,
+  scanSourceStats,
   bitGridCheck,
   classifyQuality,
   compareAnalyses,
@@ -17,7 +19,53 @@ import {
 import { fft } from "./fft.ts";
 import { sniffContainer } from "./sniff.ts";
 import { rankedIds } from "./rank.ts";
+import { sharedClipFraction } from "./refine.ts";
 import type { Analysis, QualityClass, RolloffKind } from "./types.ts";
+
+describe("resource and invalid-sample guards", () => {
+  it("counts clipping only inside measured passages and resets runs between them", () => {
+    const audio = new Float32Array(100).fill(1);
+    audio.fill(0, 20, 80);
+    assert.equal(sharedClipFraction(audio, [{ start: 20, end: 80 }]), 0);
+    assert.equal(sharedClipFraction(audio, [{ start: 0, end: 20 }]), 1);
+    assert.equal(
+      sharedClipFraction(audio, [
+        { start: 0, end: 10 },
+        { start: 90, end: 100 },
+      ]),
+      0,
+    );
+  });
+  it("rejects oversized non-WAV files without reading the full file", async () => {
+    const file = new File([new Uint8Array(64)], "large.flac");
+    Object.defineProperty(file, "size", { value: 700 * 1024 * 1024 });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: () => {
+        throw new Error("full read attempted");
+      },
+    });
+    await assert.rejects(
+      analyzeFile(file),
+      (error: Error) => !error.message.includes("full read attempted"),
+    );
+  });
+  it("keeps streaming statistics finite when channels contain invalid samples", async () => {
+    const left = new Float32Array(512).fill(0.25);
+    const right = new Float32Array(512).fill(0.25);
+    left[20] = NaN;
+    right[30] = Infinity;
+    const stats = await scanSourceStats({
+      sampleRate: 8000,
+      length: 512,
+      numberOfChannels: 2,
+      async sliceChannels(start, end) {
+        return [left.slice(start, end), right.slice(start, end)];
+      },
+    });
+    for (const value of [stats.rmsDb, stats.crestDb, stats.stereoWidth, ...stats.envelope.power])
+      assert.ok(Number.isFinite(value));
+  });
+});
 
 function mkAnalysis(o: {
   id?: string;

@@ -101,6 +101,24 @@ export function alignGroup(analyses: Analysis[]): GroupAlignment | null {
 
 type Span = { start: number; end: number };
 
+export function sharedClipFraction(mono: Float32Array, regions: Span[]): number {
+  let clipped = 0;
+  let measured = 0;
+  for (const region of regions) {
+    let run = 0;
+    for (let i = region.start; i < region.end; i++) {
+      measured++;
+      if (Math.abs(mono[i]!) >= 0.999) run++;
+      else {
+        if (run >= 16) clipped += run;
+        run = 0;
+      }
+    }
+    if (run >= 16) clipped += run;
+  }
+  return clipped / Math.max(1, measured);
+}
+
 /** Mirrors the base window layout (analyze.ts scanRegions), in seconds. */
 function sharedWindows(
   env: { blockSec: number; power: Float32Array },
@@ -166,7 +184,7 @@ async function remeasure(
   const dsp = await runDspParallel(
     mono,
     sr,
-    analysis.clipFraction,
+    sharedClipFraction(mono, spans.regions),
     undefined,
     spans,
     signal,
