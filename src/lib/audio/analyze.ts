@@ -23,6 +23,10 @@ import type {
 
 const FFT_SIZE = 4096;
 const HOP = 2048;
+let nextAnalysisId = 0;
+function newAnalysisId(): string {
+  return `analysis-${++nextAnalysisId}`;
+}
 const EPS = 1e-12;
 const DISPLAY_BINS = 512;
 const DISPLAY_MAX_HZ = 22050;
@@ -1248,7 +1252,10 @@ export async function scanSourceStats(
     const len = Math.max(0, end - s);
     for (let i = 0; i < len; i++) {
       let v = 0;
-      for (let c = 0; c < channels.length; c++) v += channels[c]![i]!;
+      for (let c = 0; c < channels.length; c++) {
+        const sample = channels[c]![i]!;
+        v += Number.isFinite(sample) ? sample : 0;
+      }
       v *= scale;
       const a = v < 0 ? -v : v;
       if (a > peak) peak = a;
@@ -1267,8 +1274,10 @@ export async function scanSourceStats(
       }
       if (ch >= 2 && gi % strideWidth === 0) {
         // Stereo width tap (strided like stereoWidth()).
-        const L = channels[0]![i]!;
-        const R = channels[1]![i]!;
+        const left = channels[0]![i]!;
+        const right = channels[1]![i]!;
+        const L = Number.isFinite(left) ? left : 0;
+        const R = Number.isFinite(right) ? right : 0;
         const m = 0.5 * (L + R);
         const sd = 0.5 * (L - R);
         mid += m * m;
@@ -1487,7 +1496,7 @@ async function analyzeStreamingWav(
   onProgress?.("Done", 1);
 
   const analysis: Analysis = {
-    id: `${file.name}-${file.size}-${file.lastModified}`,
+    id: newAnalysisId(),
     fileName: file.name,
     fileSize: file.size,
     mimeType: file.type,
@@ -1554,7 +1563,7 @@ export async function analyzeFile(
       onProgress?.("Done", 1);
       return {
         ...hit,
-        id: `${file.name}-${file.size}-${file.lastModified}`,
+        id: newAnalysisId(),
         fileName: file.name,
         fileSize: file.size,
         mimeType: file.type,
@@ -1574,12 +1583,14 @@ export async function analyzeFile(
     return analyzeStreamingWav(file, wavMeta, key, onProgress, signal);
   }
 
+  if (file.size > maxBytes) {
+    const header = await file.slice(0, 512 * 1024).arrayBuffer();
+    throwIfAborted(signal);
+    throw new Error(oversizeMessage(sniffContainer(header, file.name, file.type).codec));
+  }
   const arrayBuffer = await file.arrayBuffer();
   throwIfAborted(signal);
   const container = sniffContainer(arrayBuffer, file.name, file.type);
-  if (file.size > maxBytes) {
-    throw new Error(oversizeMessage(container.codec));
-  }
 
   onProgress?.("Decoding", 0.12);
   let audio: AudioBuffer;
@@ -1686,7 +1697,7 @@ export async function analyzeFile(
   onProgress?.("Done", 1);
 
   const analysis: Analysis = {
-    id: `${file.name}-${file.size}-${file.lastModified}`,
+    id: newAnalysisId(),
     fileName: file.name,
     fileSize: file.size,
     mimeType: file.type,

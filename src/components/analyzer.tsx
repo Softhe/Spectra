@@ -1,4 +1,4 @@
-import { AudioLines, Eye, EyeOff } from "lucide-react";
+import { AudioLines, Eye, EyeOff, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
 import {
@@ -8,7 +8,7 @@ import {
   type ScanState,
   type SlotState,
 } from "@/components/file-slot";
-import { CompareTable, HowTo, Verdict } from "@/components/panels";
+import { CompareTable, HowTo, Verdict, VolumeControl } from "@/components/panels";
 import { Leaderboard } from "@/components/leaderboard";
 import { SpectrumPlot } from "@/components/spectrum-plot";
 import { Button } from "@/components/ui/button";
@@ -80,6 +80,8 @@ export function Analyzer() {
   const urls = useRef<Partial<Record<SlotId, string | null>>>({});
   const originalFiles = useRef(new Map<string, File>());
   const controllers = useRef<Partial<Record<SlotId, AbortController | null>>>({});
+  const scanCtl = useRef<AbortController | null>(null);
+  const scanSlot = useRef<SlotId | null>(null);
   // Transient feedback when a drop matches nothing audio-like.
   const [dropNotice, setDropNotice] = useState<string | null>(null);
   const noticeTimer = useRef(0);
@@ -93,6 +95,7 @@ export function Analyzer() {
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
   const release = useCallback((id: SlotId) => {
+    if (scanSlot.current === id) scanCtl.current?.abort();
     // Stop this slot's playback first: revoking a blob URL out from under
     // a playing element kills seeks and can stall the element. Other
     // slots keep playing. loading B must never silence A.
@@ -110,10 +113,11 @@ export function Analyzer() {
   // the A/B session, refinement, and leaderboard are all keyed by analysis
   // id, so a swap invalidates nothing.
   const swapSlots = useCallback((x: SlotId, y: SlotId) => {
+    if (scanSlot.current === x || scanSlot.current === y) scanCtl.current?.abort();
     setSlots((s) => ({ ...s, [x]: s[y]!, [y]: s[x]! }));
     [urls.current[x], urls.current[y]] = [urls.current[y], urls.current[x]];
     setOverrides((o) => ({ ...o, [x]: o[y] ?? null, [y]: o[x] ?? null }));
-    setScanStates((st) => ({ ...st, [x]: st[y] ?? null, [y]: st[x] ?? null }));
+    setScanStates((st) => ({ ...st, [x]: null, [y]: null }));
   }, []);
 
   const run = useCallback(
@@ -741,6 +745,11 @@ export function Analyzer() {
       // point: identical takes position).
       const otherTime = playingEl && !playingEl.paused ? playingEl.currentTime : null;
       let t = otherTime ?? targetEl.currentTime;
+      if (otherTime != null && playingEl?.dataset.slot) {
+        const source = analysesRef.current[playingEl.dataset.slot as SlotId];
+        const destination = analysesRef.current[target];
+        if (source && destination) t += offsetOf(destination.id) - offsetOf(source.id);
+      }
       if (loopOnRef.current) {
         const a = analysesRef.current[target];
         if (a) {
@@ -760,7 +769,8 @@ export function Analyzer() {
       const targetAnalysis = analysesRef.current[target] ?? null;
       const otherAnalysis = otherId ? (analysesRef.current[otherId] ?? null) : null;
       const rmsT = targetAnalysis?.rmsDb ?? pair.a.rmsDb;
-      const rmsO = otherAnalysis?.rmsDb ?? (target === "a" ? pair.b.rmsDb : pair.a.rmsDb);
+      const rmsO =
+        otherAnalysis?.rmsDb ?? (targetAnalysis?.id === pair.a.id ? pair.b.rmsDb : pair.a.rmsDb);
       const diffDb = rmsO - rmsT;
       const ratio = Math.max(0.05, Math.min(1, Math.pow(10, -Math.abs(diffDb) / 20)));
       const targetIsLouder = diffDb <= 0;
@@ -882,7 +892,6 @@ export function Analyzer() {
 
   const [scanStates, setScanStates] = useState<Partial<Record<SlotId, ScanState>>>({});
   const [overrides, setOverrides] = useState<Partial<Record<SlotId, SpectrogramData | null>>>({});
-  const scanCtl = useRef<AbortController | null>(null);
   useEffect(() => () => scanCtl.current?.abort(), []);
 
   const runScan = useCallback(
@@ -892,19 +901,24 @@ export function Analyzer() {
       setScanStates((st) => ({ ...st, [id]: { busy: true, progress: 0.02, phase: "Reading" } }));
       const controller = new AbortController();
       scanCtl.current = controller;
+      scanSlot.current = id;
       try {
         const res = await fetch(a.objectUrl);
         if (!res.ok) throw new Error("That file is no longer available to re-scan.");
         const blob = await res.blob();
-        const data = await scanExcerpt(
-          blob,
-          a.container.sampleRate,
-          seekSec,
-          (phase, amount) => {
-            setScanStates((st) => ({ ...st, [id]: { busy: true, progress: amount, phase } }));
-          },
-          controller.signal,
+        const data = await enqueueAnalysis(() =>
+          scanExcerpt(
+            blob,
+            a.container.sampleRate,
+            seekSec,
+            (phase, amount) => {
+              if (controller.signal.aborted || analysesRef.current[id]?.id !== a.id) return;
+              setScanStates((st) => ({ ...st, [id]: { busy: true, progress: amount, phase } }));
+            },
+            controller.signal,
+          ),
         );
+        if (controller.signal.aborted || analysesRef.current[id]?.id !== a.id) return;
         setOverrides((o) => ({ ...o, [id]: data }));
         setScanStates((st) => ({ ...st, [id]: null }));
       } catch (err) {
@@ -912,7 +926,10 @@ export function Analyzer() {
         setScanStates((st) => ({ ...st, [id]: null }));
         showDropNotice(err instanceof Error ? err.message : "That excerpt could not be scanned.");
       } finally {
-        if (scanCtl.current === controller) scanCtl.current = null;
+        if (scanCtl.current === controller) {
+          scanCtl.current = null;
+          scanSlot.current = null;
+        }
       }
     },
     [showDropNotice],
@@ -1043,6 +1060,17 @@ export function Analyzer() {
               to switch between clips. Use the five-second loop to repeat a passage.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => abSwitch("a")}>
+                Listen to clip 1
+              </Button>
+              <Button variant="outline" onClick={() => abSwitch("b")}>
+                Listen to clip 2
+              </Button>
+              <Button variant="outline" onClick={toggleLoop} aria-pressed={loopOn}>
+                <Repeat className="size-4" />
+                {loopOn ? "5 s loop on" : "5 s loop"}
+              </Button>
+              <VolumeControl volume={volume} onVolumeChange={handleVolumeChange} />
               <Button onClick={() => setBlind({ revealed: true })}>
                 <Eye className="size-4" />
                 Reveal

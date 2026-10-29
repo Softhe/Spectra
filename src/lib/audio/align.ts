@@ -146,7 +146,9 @@ export function testLag(
     varB += db * db;
   }
   const denom = Math.sqrt(varA * varB);
-  const r = denom > 0 ? Math.max(-1, Math.min(1, cov / denom)) : -1;
+  const usable = varA > n * meanA * meanA * 1e-20 && varB > n * meanB * meanB * 1e-20;
+  if (!usable) return { corr2: -1, corr: -1, overlapSec: iLen * a.blockSec };
+  const r = Math.max(-1, Math.min(1, cov / denom));
   return { corr2: r * r, corr: r, overlapSec: iLen * a.blockSec };
 }
 
@@ -198,7 +200,7 @@ export function songMatchOf(a: Envelope, b: Envelope): SongMatch {
     Math.max(BASE_LAG_SEC, durDiffSec + 5),
   );
   let status: SongMatchStatus;
-  if (overlapSec < MIN_OVERLAP_SEC) {
+  if (overlapSec < MIN_OVERLAP_SEC || correlation === -1) {
     // Too little shared timeline to verify anything — say so, without
     // claiming two 4-second clips are different songs.
     status = "uncertain";

@@ -254,7 +254,7 @@ function CopyReport({
   );
 }
 
-function VolumeControl({
+export function VolumeControl({
   volume,
   onVolumeChange,
 }: {

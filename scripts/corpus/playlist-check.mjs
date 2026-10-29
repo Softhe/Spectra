@@ -138,7 +138,10 @@ try {
               ? result.verdict.winner === "a"
               : false;
       results.push({ id: item.id, expected: item.expected, failed, ...result });
-      if (failed) process.exitCode = 1;
+      if (failed) {
+        process.exitCode = 1;
+        break;
+      }
     } catch (error) {
       results.push({ id: item.id, error: error.message });
       process.exitCode = 1;
