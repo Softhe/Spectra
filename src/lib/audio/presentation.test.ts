@@ -16,6 +16,13 @@ it("separates PCM data rate, compressed lossless rate and encoded MP3 rate", () 
     label: "PCM data rate",
     value: "1411 kbps",
   });
+  assert.deepEqual(
+    bitrateDescription({ container: { ...container, codec: "PCM float", bitDepth: 32 } }),
+    {
+      label: "PCM data rate",
+      value: "2822 kbps",
+    },
+  );
   assert.deepEqual(bitrateDescription({ container: { ...container, codec: "FLAC" } }), {
     label: "Compressed audio bitrate",
     value: "Variable",

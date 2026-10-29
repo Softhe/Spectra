@@ -6,7 +6,7 @@ export function bitrateDescription(audio: Pick<Analysis, "container">): {
   value: string;
 } {
   const info = audio.container;
-  if (/^(PCM|WAV|AIFF)$/i.test(info.codec)) {
+  if (/^(PCM(?: float)?|WAV|AIFF)$/i.test(info.codec)) {
     const rate =
       info.sampleRate && info.channels && info.bitDepth
         ? (info.sampleRate * info.channels * Math.ceil(info.bitDepth / 8) * 8) / 1000
