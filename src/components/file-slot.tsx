@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, STOP_EVENT } from "@/components/audio-drop";
 import { SpectrogramCanvas } from "@/components/spectrogram-canvas";
 import { Button } from "@/components/ui/button";
+import { bitrateDescription } from "@/lib/audio/presentation";
 import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
   channelLabel,
@@ -71,7 +72,7 @@ type Props = {
   onResetOverride?: () => void;
 };
 
-const LOOP_WRAP_BACK = 0.75; // s — tolerate a small overshoot before re-wrapping
+const LOOP_WRAP_BACK = 0.75; // s. tolerate a small overshoot before re-wrapping
 
 const ACCEPT = "audio/*,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.aiff,.aif,.mp4,.caf,.webm";
 
@@ -198,7 +199,7 @@ export function FileSlot({
       // surfaces as an error line instead of a stuck pause icon.
       el.play().catch(() => {
         setPlaying(false);
-        setPlayError("Preview couldn't start — try again.");
+        setPlayError("Preview could not start. Retry.");
       });
     } else {
       el.pause();
@@ -315,7 +316,7 @@ export function FileSlot({
             <Upload className="size-5" />
           </span>
           <span className="text-sm text-fg">Drop MP3, M4A, WAV, FLAC, OGG, AIFF, or WebM</span>
-          <span className="text-xs text-muted">or click to browse</span>
+          <span className="text-xs text-muted">or choose a file</span>
         </button>
       )}
 
@@ -454,8 +455,7 @@ export function FileSlot({
             <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-md bg-bg-inset text-center sm:h-64">
               <EyeOff className="size-5 text-faint" />
               <p className="max-w-60 text-xs leading-relaxed text-muted">
-                Spectrogram and measurements are hidden for this round — reveal to see who kept the
-                air.
+                Names and measurements stay hidden until you reveal the copies.
               </p>
             </div>
           ) : (
@@ -529,22 +529,17 @@ export function FileSlot({
                 </summary>
                 {state.analysis.liteAnalysis && (
                   <p className="mb-3 text-xs leading-relaxed text-warn">
-                    Lite analysis: this long file was analyzed from its loudest excerpts to stay
-                    within memory limits.
+                    This long file was analyzed from selected loud passages to limit memory use.
                   </p>
                 )}
                 <dl className="grid grid-cols-1 gap-x-4 gap-y-3 pb-4 min-[360px]:grid-cols-2">
                   <Stat
-                    label="Container bitrate"
+                    label="File-size average, including metadata"
                     value={formatKbps(state.analysis.containerKbps)}
                   />
                   <Stat
-                    label="Header bitrate"
-                    value={
-                      state.analysis.container.claimedKbps
-                        ? `${formatKbps(state.analysis.container.claimedKbps)}${state.analysis.container.vbr ? " VBR" : ""}`
-                        : "—"
-                    }
+                    label={bitrateDescription(state.analysis).label}
+                    value={bitrateDescription(state.analysis).value}
                   />
                   <Stat
                     label="Bit depth"
@@ -606,7 +601,7 @@ function refinedChanged(a: Analysis, r: RefinedMetrics | null | undefined): bool
 function bitDepthLabel(a: Analysis): string {
   const bits = a.container.bitDepth;
   const eff = a.effectiveBits;
-  if (bits == null) return "—";
+  if (bits == null) return "Not available";
   if (typeof eff === "number" && eff < bits) {
     return `${bits}-bit container · ${eff}-bit content`;
   }
@@ -630,7 +625,7 @@ function SeekBar({
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const clamped = Math.max(0, Math.min(position, safeDuration));
   // While dragging, show the dragged value and only hit the media element
-  // on commit — one seek per gesture instead of dozens per second (each
+  // on commit. one seek per gesture instead of dozens per second (each
   // restarts decode and stutters the A/B comparison).
   const [dragValue, setDragValue] = useState<number | null>(null);
   return (

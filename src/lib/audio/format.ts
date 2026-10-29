@@ -1,17 +1,17 @@
 export function formatHz(hz: number): string {
-  if (!Number.isFinite(hz)) return "—";
+  if (!Number.isFinite(hz)) return "Not available";
   if (hz >= 1000) return `${(hz / 1000).toFixed(1)} kHz`;
   return `${Math.round(hz)} Hz`;
 }
 
 export function formatKbps(kbps: number | null | undefined): string {
-  if (kbps == null || !Number.isFinite(kbps) || kbps <= 0) return "—";
+  if (kbps == null || !Number.isFinite(kbps) || kbps <= 0) return "Not available";
   if (kbps >= 1000) return `${(kbps / 1000).toFixed(2)} Mbps`;
   return `${Math.round(kbps)} kbps`;
 }
 
 export function formatDuration(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return "—";
+  if (!Number.isFinite(sec) || sec < 0) return "Not available";
   const s = Math.round(sec);
   const m = Math.floor(s / 60);
   const r = s % 60;
@@ -27,13 +27,13 @@ export function formatBytes(n: number): string {
 }
 
 export function formatDb(db: number, digits = 1): string {
-  if (!Number.isFinite(db)) return "—";
+  if (!Number.isFinite(db)) return "Not available";
   const v = Math.max(-96, db);
   return `${v.toFixed(digits)} dB`;
 }
 
 export function formatSampleRate(hz: number): string {
-  if (!Number.isFinite(hz)) return "—";
+  if (!Number.isFinite(hz)) return "Not available";
   if (hz >= 1000) return `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)} kHz`;
   return `${Math.round(hz)} Hz`;
 }

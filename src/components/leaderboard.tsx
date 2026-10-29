@@ -56,12 +56,13 @@ export function Leaderboard({
     <section className="rounded-xl bg-bg-elevated p-4 sm:p-5" aria-label="Head-to-head ranking">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h2 className="text-sm font-medium text-fg">Leaderboard</h2>
+          <h2 className="text-sm font-medium text-fg">Pairwise results</h2>
           <p className="mt-0.5 text-xs text-muted">
-            Every pair judged with the same rules as the headline verdict — win +1 point, tie +½.
+            A preference earns one point. An inconclusive comparison earns half a point. Pairs that
+            cannot be compared earn no points.
             {refinement
-              ? " Numbers come from the passages every copy shares."
-              : " Bandwidth margins decide close calls."}
+              ? " Measurements use shared passages."
+              : " Shared measurements are required before ranking."}
           </p>
         </div>
       </div>
@@ -79,7 +80,7 @@ export function Leaderboard({
               className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 py-3 last:border-b-0"
             >
               <span className="w-6 font-mono text-sm text-faint tabular-nums">
-                {ranking.outsiders.has(row.fid) ? "—" : `${rank + 1}.`}
+                {ranking.outsiders.has(row.fid) ? "N/A" : `${rank + 1}.`}
               </span>
               {slot && (
                 <span
@@ -111,9 +112,9 @@ export function Leaderboard({
                   </span>
                   <span
                     className="font-mono text-xs text-faint tabular-nums"
-                    title="Pairs won outright"
+                    title="Comparisons favoring this copy"
                   >
-                    {wins}/{rankedCount - 1} wins
+                    {wins}/{rankedCount - 1} preferences
                   </span>
                 </>
               )}
@@ -147,7 +148,9 @@ export function Leaderboard({
       </ol>
       {pairs.length > 1 && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className="font-mono text-[11px] uppercase tracking-widest text-faint">Ear ·</span>
+          <span className="font-mono text-[11px] uppercase tracking-widest text-faint">
+            Listen ·
+          </span>
           {pairs.map(([x, y]) => {
             const sx = slotOfId[x];
             const sy = slotOfId[y];

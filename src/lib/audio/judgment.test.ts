@@ -1,5 +1,5 @@
 // Regression suite for the quality-judgment layer: classes, scores,
-// verdicts, and header parsing. Pure functions only — runs in milliseconds
+// verdicts, and header parsing. Pure functions only. runs in milliseconds
 // under `npm test` (no browser, no audio files).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -311,7 +311,7 @@ describe("compareAnalyses", () => {
     assert.match(c.detail, /estimate, not proof/);
   });
   it("never claims more air for a score win over an equal-or-higher ceiling", () => {
-    // A: natural 19 kHz, B: brickwalled 20 kHz — the score overrides the
+    // A: natural 19 kHz, B: brickwalled 20 kHz. the score overrides the
     // 1 kHz bandwidth gap, so "more air kept" would contradict itself.
     const c = compareAnalyses(
       mkAnalysis({ id: "A", cutoff: 19000, rolloff: "natural", score: 88, cls: "high" }),
@@ -329,7 +329,7 @@ describe("compareAnalyses", () => {
     );
     assert.match(
       wide.detail,
-      /^22\.0 kHz of estimated bandwidth versus 16\.0 kHz — 6\.0 kHz more measured high-frequency reach\./,
+      /^22\.0 kHz of estimated bandwidth versus 16\.0 kHz. 6\.0 kHz more measured high-frequency reach\./,
     );
   });
   it("flags a band-limited CAF wrapper like the other lossless shells", () => {
@@ -822,7 +822,7 @@ describe("sniffContainer", () => {
 describe("decodeErrorMessage", () => {
   it("points ALAC at Safari or a FLAC/WAV conversion", () => {
     const m = decodeErrorMessage("song.m4a", "ALAC");
-    assert.match(m, /“song\.m4a”/);
+    assert.match(m, /'song\.m4a'/);
     assert.match(m, /Apple Lossless \(ALAC\)/);
     assert.match(m, /Safari/);
     assert.match(m, /FLAC or WAV/);
@@ -835,7 +835,7 @@ describe("decodeErrorMessage", () => {
   });
   it("falls back to the generic format list", () => {
     const m = decodeErrorMessage("song.m4a", "AAC");
-    assert.equal(m, "Could not decode “song.m4a”. Try MP3, M4A, AAC, WAV, FLAC, or OGG.");
+    assert.equal(m, "Could not decode 'song.m4a'. Try MP3, M4A, AAC, WAV, FLAC, or OGG.");
   });
 });
 
@@ -845,7 +845,7 @@ describe("pickRegionsFromBuffer", () => {
   const mid = totalSec / 2;
   const len = totalSec * sr;
 
-  /** Minimal AudioBuffer stand-in — the suite runs in plain node. */
+  /** Minimal AudioBuffer stand-in. the suite runs in plain node. */
   const fakeBuffer = (channels: Float32Array[]): AudioBuffer =>
     ({
       length: channels[0]!.length,
@@ -867,7 +867,7 @@ describe("pickRegionsFromBuffer", () => {
   const meanMix = new Float32Array(len);
   for (let i = 0; i < len; i++) meanMix[i] = (ch0[i]! + ch1[i]!) * 0.5;
 
-  it("ranks stereo by the channel mean — picks pickRegions' regions on the mixdown", () => {
+  it("ranks stereo by the channel mean. picks pickRegions' regions on the mixdown", () => {
     assert.deepEqual(pickRegionsFromBuffer(fakeBuffer([ch0, ch1])), pickRegions(meanMix, sr));
   });
 

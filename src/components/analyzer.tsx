@@ -47,7 +47,7 @@ function deviceNeedsSerialAnalysis(): boolean {
   if (typeof nav.deviceMemory === "number" && nav.deviceMemory <= 4) return true;
   const ua = nav.userAgent || "";
   if (/iPad|iPhone|iPod/.test(ua)) return true;
-  // iPadOS 13+ reports as Macintosh — multi-touch gives it away.
+  // iPadOS 13+ reports as Macintosh. multi-touch gives it away.
   if (/Macintosh/.test(ua) && (nav.maxTouchPoints ?? 0) > 2) return true;
   return false;
 }
@@ -78,6 +78,7 @@ export function Analyzer() {
   const [visibleSlotCount, setVisibleSlotCount] = useState(2);
   const gens = useRef<Partial<Record<SlotId, number>>>({});
   const urls = useRef<Partial<Record<SlotId, string | null>>>({});
+  const originalFiles = useRef(new Map<string, File>());
   const controllers = useRef<Partial<Record<SlotId, AbortController | null>>>({});
   // Transient feedback when a drop matches nothing audio-like.
   const [dropNotice, setDropNotice] = useState<string | null>(null);
@@ -94,11 +95,12 @@ export function Analyzer() {
   const release = useCallback((id: SlotId) => {
     // Stop this slot's playback first: revoking a blob URL out from under
     // a playing element kills seeks and can stall the element. Other
-    // slots keep playing — loading B must never silence A.
+    // slots keep playing. loading B must never silence A.
     document.querySelectorAll<HTMLAudioElement>(`audio[data-slot="${id}"]`).forEach((el) => {
       if (!el.paused) el.pause();
     });
     const url = urls.current[id];
+    if (url) originalFiles.current.delete(url);
     if (url) URL.revokeObjectURL(url);
     urls.current[id] = null;
   }, []);
@@ -160,6 +162,7 @@ export function Analyzer() {
           return;
         }
         urls.current[id] = analysis.objectUrl;
+        originalFiles.current.set(analysis.objectUrl, file);
         setSlots((st) => ({ ...st, [id]: { status: "ready", analysis } }));
       } catch (err) {
         if (err instanceof CancelledError || (gens.current[id] ?? 0) !== gen) return;
@@ -206,7 +209,7 @@ export function Analyzer() {
       }
       const idleSlots = SLOT_KEYS.filter((id) => slots[id].status === "idle");
       if (idleSlots.length === 0) {
-        showDropNotice("All four slots are full — clear one to make room.");
+        showDropNotice("All four slots are full. clear one to make room.");
         return;
       }
       const taken = files.slice(0, idleSlots.length);
@@ -215,8 +218,8 @@ export function Analyzer() {
       if (overflow > 0) {
         showDropNotice(
           overflow === 1
-            ? `Loaded ${taken.length} files — 1 more than the free slots.`
-            : `Loaded ${taken.length} files — ${overflow} more than the free slots.`,
+            ? `Loaded ${taken.length} files. 1 more than the free slots.`
+            : `Loaded ${taken.length} files. ${overflow} more than the free slots.`,
         );
       }
     },
@@ -246,6 +249,7 @@ export function Analyzer() {
   const alignment = useMemo(() => alignGroup(readyFiles), [readySig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [refinement, setRefinement] = useState<Refinement | null>(null);
+  const [settledRefinement, setSettledRefinement] = useState("");
   const [refineStatus, setRefineStatus] = useState<{ phase: string; amount: number } | null>(null);
   const refineGen = useRef(0);
   const refineAbort = useRef<AbortController | null>(null);
@@ -256,7 +260,10 @@ export function Analyzer() {
     refineAbort.current?.abort();
     setRefinement(null);
     setRefineStatus(null);
-    if (files.length < 2 || !alignment) return;
+    if (files.length < 2 || !alignment) {
+      setSettledRefinement(readySig);
+      return;
+    }
     const controller = new AbortController();
     refineAbort.current = controller;
     // Re-measuring decodes every file again: on serial devices it waits its
@@ -277,10 +284,12 @@ export function Analyzer() {
         if (controller.signal.aborted || refineGen.current !== myGen) return;
         setRefineStatus(null);
         setRefinement(res);
+        setSettledRefinement(readySig);
       })
       .catch((err) => {
         if (controller.signal.aborted || refineGen.current !== myGen) return;
         setRefineStatus(null);
+        setSettledRefinement(readySig);
         if (!(err instanceof CancelledError)) {
           // Keep alignment/playback; unavailable shared measurements suppress a preference.
           console.warn("refinement failed", err);
@@ -449,7 +458,7 @@ export function Analyzer() {
   const switchPending = useRef(0);
 
   // One global volume for all previews (persisted). Fresh sessions start at
-  // 75% — clearly audible but never ear-splitting. The A/B loudness match
+  // 75%. clearly audible but never ear-splitting. The A/B loudness match
   // lives separately as per-slot ratios, so switching never moves this.
   const [volume, setVolume] = useState<number>(() => {
     try {
@@ -505,7 +514,7 @@ export function Analyzer() {
     SLOT_KEYS.map((id) => [id, analysisOf(slots[id])]).filter(([, a]) => a != null),
   );
   // Last slot that actually played, A/B or manual. Kept apart from abPlaying,
-  // which clears on pause — headset play must resume the copy that paused.
+  // which clears on pause. headset play must resume the copy that paused.
   const lastPlayedRef = useRef<SlotId | null>(null);
   // Latest-switch ref: lets the Media Session handlers (subscribed once)
   // always reach the current abSwitch without re-subscribing.
@@ -628,7 +637,7 @@ export function Analyzer() {
       }
     };
     requestAnimationFrame(step);
-    // rAF freezes in hidden tabs — without this backstop the old side
+    // rAF freezes in hidden tabs. without this backstop the old side
     // would keep playing under the new one indefinitely.
     window.setTimeout(() => {
       if ((fadeSeq.current[id] ?? 0) !== seq) return;
@@ -727,7 +736,7 @@ export function Analyzer() {
         switchPending.current = 0;
         return;
       }
-      // Continue where the other preview left off — unless the loop is on,
+      // Continue where the other preview left off. unless the loop is on,
       // which always restarts at the pair-aligned loop window (the whole
       // point: identical takes position).
       const otherTime = playingEl && !playingEl.paused ? playingEl.currentTime : null;
@@ -764,8 +773,8 @@ export function Analyzer() {
       const otherVolume = Math.min(1, Math.max(0, volume * (targetIsLouder ? 1 : ratio)));
       // The target may still be fading out from a switch this one supersedes
       // (switching back within the fade, or within the 600 ms backstop while
-      // rAF is frozen on a locked screen). Cancel that fade now — its rAF
-      // steps and backstop both check fadeSeq — or it would pause the target
+      // rAF is frozen on a locked screen). Cancel that fade now. its rAF
+      // steps and backstop both check fadeSeq. or it would pause the target
       // right after this switch starts or adopts it, ending the session.
       fadeSeq.current[target] = (fadeSeq.current[target] ?? 0) + 1;
       targetEl.volume = targetVolume;
@@ -944,18 +953,6 @@ export function Analyzer() {
     }
   }, [comparison, focusPair, slotOfId, blindHidden]);
 
-  const refineNote = useMemo(() => {
-    if (!refinement) return null;
-    const n = Object.keys(refinement.refined).length;
-    const who =
-      n < readyFiles.length ? `the ${n} copies that match` : n === 2 ? "both" : `all ${n}`;
-    return (
-      `To compare the same musical material, ${who} were re-measured over ` +
-      `the same ${refinement.windows === 1 ? "passage" : `${refinement.windows} passages`} of the song ` +
-      `(${refinement.measuredSec.toFixed(0)} s measured within ${refinement.overlapSec.toFixed(0)} s of overlap).`
-    );
-  }, [refinement, readyFiles.length]);
-
   return (
     <div
       className="min-h-dvh bg-bg text-fg"
@@ -967,7 +964,7 @@ export function Analyzer() {
           <div className="max-w-xl">
             <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">Spectra</p>
             <h1 className="mt-2 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
-              Which copy should you keep?
+              Compare audio copies
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
               Compare two copies of the same recording. Spectra aligns shared passages and shows the
@@ -1007,7 +1004,7 @@ export function Analyzer() {
 
         {!blindHidden && refineStatus && (
           <div className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-muted shadow-[var(--shadow-border)]">
-            <p aria-live="polite">Lining up the copies — {refineStatus.phase}</p>
+            <p aria-live="polite">Measuring shared passages. {refineStatus.phase}</p>
             <div
               role="progressbar"
               aria-label="Shared-passage re-measurement progress"
@@ -1023,11 +1020,6 @@ export function Analyzer() {
             </div>
           </div>
         )}
-        {!blindHidden && !refineStatus && refineNote && (
-          <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-faint shadow-[var(--shadow-border)]">
-            {refineNote}
-          </p>
-        )}
 
         {blindHidden && (
           <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
@@ -1036,11 +1028,11 @@ export function Analyzer() {
               Blind test in progress
             </p>
             <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
-              Judge by ear, then reveal
+              Listen before revealing the copies
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
               Clip 1 and Clip 2 below are hidden copies. Names, numbers, and pictures come back when
-              you reveal — and the verdict will tell you which hidden clip kept the air. Press{" "}
+              you reveal. Press{" "}
               <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
                 A
               </kbd>
@@ -1048,7 +1040,7 @@ export function Analyzer() {
               <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
                 B
               </kbd>{" "}
-              to flip between the clips, or turn on the 5-second loop for the toughest passages.
+              to switch between clips. Use the five-second loop to repeat a passage.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <Button onClick={() => setBlind({ revealed: true })}>
@@ -1057,7 +1049,7 @@ export function Analyzer() {
               </Button>
               <Button variant="outline" onClick={startBlindRound}>
                 <AudioLines className="size-4" />
-                New round
+                Start another round
               </Button>
             </div>
           </aside>
@@ -1065,9 +1057,16 @@ export function Analyzer() {
 
         {comparison && pairAnalyses && !blindHidden ? (
           <Verdict
+            key={`${pairAnalyses.a.objectUrl}|${pairAnalyses.b.objectUrl}`}
             comparison={comparison}
             a={pairDisplay!.a}
             b={pairDisplay!.b}
+            fileA={originalFiles.current.get(pairAnalyses.a.objectUrl)}
+            fileB={originalFiles.current.get(pairAnalyses.b.objectUrl)}
+            analysisBusy={
+              settledRefinement !== readySig ||
+              Object.values(slots).some((slot) => slot.status === "loading")
+            }
             slotA={slotOfId[pairAnalyses.a.id] ?? "a"}
             slotB={slotOfId[pairAnalyses.b.id] ?? "b"}
             abPlaying={abPlaying}
@@ -1082,13 +1081,13 @@ export function Analyzer() {
 
         {blind?.revealed && (
           <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-muted shadow-[var(--shadow-border)]">
-            Round revealed —{" "}
+            Round revealed.{" "}
             <span className="text-fg [overflow-wrap:anywhere]">
-              Clip 1 was {pairAnalyses?.a.fileName ?? "—"}
+              Clip 1 was {pairAnalyses?.a.fileName ?? "Not available"}
             </span>{" "}
             and{" "}
             <span className="text-fg [overflow-wrap:anywhere]">
-              Clip 2 was {pairAnalyses?.b.fileName ?? "—"}
+              Clip 2 was {pairAnalyses?.b.fileName ?? "Not available"}
             </span>
             . Names and pictures are unmasked; start a new round to hide them again.
           </p>

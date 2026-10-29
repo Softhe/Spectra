@@ -59,8 +59,7 @@ async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array
     ph3 += inc(329.63);
     ph4 += inc(440);
 
-    const kick =
-      Math.sin(2 * Math.PI * (52 + beat * 8) * beat) * env(beat, 0.004, 14) * 0.72;
+    const kick = Math.sin(2 * Math.PI * (52 + beat * 8) * beat) * env(beat, 0.004, 14) * 0.72;
     const bass = saw(phBass) * 0.2 * (0.65 + 0.35 * Math.sin(2 * Math.PI * 0.5 * t));
     const pad =
       (saw(ph1) * 0.11 + saw(ph2) * 0.09 + saw(ph3) * 0.08 + saw(ph4) * 0.06) *
@@ -166,6 +165,6 @@ export async function makeDemoFiles(): Promise<{ a: File; b: File }> {
   const aBlob = encodeWav(master.left, master.right);
   const bBlob = encodeWav(ripL, ripR);
   const a = new File([aBlob], "demo-master.wav", { type: "audio/wav" });
-  const b = new File([bBlob], "demo-128k-rip.wav", { type: "audio/wav" });
+  const b = new File([bBlob], "demo-lowpass-16khz.wav", { type: "audio/wav" });
   return { a, b };
 }

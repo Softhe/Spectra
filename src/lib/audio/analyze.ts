@@ -135,7 +135,7 @@ async function mixDownWithStats(
 /**
  * Replace NaN/±Infinity samples with 0 in every channel (chunked, with
  * yields like the other full-buffer passes). Mutates the decoded buffer in
- * place — getChannelData returns the live storage — so all downstream
+ * place. getChannelData returns the live storage. so all downstream
  * readers (mix-down, stereo width, DSP) see sanitized samples.
  */
 async function sanitizeNonFinite(buffer: AudioBuffer, signal?: AbortSignal): Promise<void> {
@@ -201,7 +201,7 @@ const GRID_MIN_SAMPLES = 4096;
  * can miss a dithered pad but never flags honest audio.
  *
  * Exact zeros sit on every grid and prove nothing, so only non-zero samples
- * count — digital silence or a near-silent probe returns null instead of a
+ * count. digital silence or a near-silent probe returns null instead of a
  * confident (and false) "16-bit". Every channel must fit: a pad applies to
  * the whole file, and one honest 24-bit channel disproves it.
  */
@@ -389,7 +389,7 @@ export async function stftPower(
   }
 
   if (magDb.length === 0) {
-    // File shorter than FFT window — zero-pad once.
+    // File shorter than FFT window. zero-pad once.
     real.fill(0);
     imag.fill(0);
     const n = Math.min(FFT_SIZE, end - start);
@@ -416,7 +416,7 @@ export async function stftPower(
 /**
  * Loud-frame mask: frames within `gateDb` of the loudest are kept; fades,
  * silence, and MP3 padding are excluded. Returns null (keep everything)
- * when gating would discard more than 75% — never gate the pool away.
+ * when gating would discard more than 75%. never gate the pool away.
  */
 export function loudFrameMask(
   frameRmsDb: Float32Array | null | undefined,
@@ -538,9 +538,9 @@ function occupancyCurve(
 export type DspOptions = {
   /**
    * False when the decode rate was NOT confirmed by the container (no sniffed
-   * rate, or the hinted rate failed and a fallback rate was used — then pass
+   * rate, or the hinted rate failed and a fallback rate was used. then pass
    * it as `sourceRate`). A 44.1 kHz source decoded at 48 kHz keeps its own
-   * band edge near 22 kHz, far below the new Nyquist — that edge must not
+   * band edge near 22 kHz, far below the new Nyquist. that edge must not
    * read as an encoder low-pass. Omitted/true keeps the calibrated behavior
    * exactly.
    */
@@ -577,7 +577,7 @@ export async function detectCutoff(
   bbFlatness: number;
   /**
    * True when the ceiling looks like the music running out (no cliff, no
-   * air) rather than an encoder low-pass — class must cap at "high".
+   * air) rather than an encoder low-pass. class must cap at "high".
    */
   sourceLimited: boolean;
   /**
@@ -603,7 +603,7 @@ export async function detectCutoff(
   }
   let cutoffHz = Math.min(nyquist, cutoffBin * binHz);
 
-  // Source band edge — only when the decode rate is a guess. A 44.1 kHz
+  // Source band edge. only when the decode rate is a guess. A 44.1 kHz
   // source decoded at 48 kHz carries its own band edge near 22.05 kHz, far
   // below the decode Nyquist; that edge must not read as an encoder
   // low-pass. With a known container rate whose native decode failed, the
@@ -652,7 +652,7 @@ export async function detectCutoff(
    *
    * RESIDUAL AMBIGUITY: a genuine encoder low-pass whose cliff crosses in
    * [edge − 700, edge] (≈ 21.35–22.09 kHz for 44.1 kHz) is indistinguishable
-   * from that band edge — neither position nor steepness separates them —
+   * from that band edge. neither position nor steepness separates them —
    * and is read as the source's. Common encoders top out near 20–20.5 kHz,
    * so this band is nearly empty in practice, and it only applies to
    * unconfirmed-rate decodes. A soft fade (wider than `maxWidthHz`)
@@ -711,7 +711,7 @@ export async function detectCutoff(
     cutoffHz = brickwallHz;
   } else if (steepest > 0.16 && hfSlope < -6) {
     // Occupancy dips without a real HF decline are sparse-content wobble
-    // (quiet mixes, stepped tones) — not an encoder rolloff.
+    // (quiet mixes, stepped tones). not an encoder rolloff.
     rolloff = "steep";
   }
 
@@ -740,7 +740,7 @@ export async function detectCutoff(
         const t = transition(meanSm, k, k + cliffSpan);
         const edge = edgeFor(t.posHz, t.widthHz, MEAN_EDGE_MAX_WIDTH);
         if (edge !== null) {
-          // The source's band edge, not an encoder cut — and nothing above
+          // The source's band edge, not an encoder cut. and nothing above
           // it belongs to the source, so stop scanning here.
           sourceEdge ??= edge;
           break;
@@ -758,7 +758,7 @@ export async function detectCutoff(
   if (sourceEdge !== null && brickwallHz !== null && brickwallHz > sourceEdge - EDGE_BELOW) {
     sourceEdge = null;
   }
-  // Only a cliff establishes a source edge — a natural fade near 22 kHz is
+  // Only a cliff establishes a source edge. a natural fade near 22 kHz is
   // the music running out and is judged against the decode Nyquist.
   const sourceNyquistHz = sourceEdge ?? nyquist;
   cutoffHz = Math.min(cutoffHz, sourceNyquistHz);
@@ -794,7 +794,7 @@ export async function detectCutoff(
     if (count === 0 || sumLin <= 0) return 0;
     const avgDb = sumDb / count;
     const avgLin = sumLin / count;
-    // Near-silent bands (dither, encoding floor) read "flat" — meaningless,
+    // Near-silent bands (dither, encoding floor) read "flat". meaningless,
     // so only report flatness for bands with real energy.
     if (10 * Math.log10(avgLin + EPS) < -75) return 0;
     const f = Math.pow(10, (avgDb - 10 * Math.log10(avgLin + EPS)) / 10);
@@ -832,14 +832,14 @@ export function classifyQuality(
   const sourceLimited = opts?.sourceLimited ?? false;
 
   // Starved-bitrate noise soup (full-band mush): cap hard. Never fires on
-  // the valid corpus (max observed 0.14) — pure insurance.
+  // the valid corpus (max observed 0.14). pure insurance.
   if (bbFlatness > 0.45) return "low";
 
   // The music ran out before any encoder did: provably transparent, but the
   // ceiling reflects the source, so "high" is the honest ceiling.
   if (sourceLimited) return "high";
 
-  // The lossless bar caps at 24 kHz — content above that is mic/air, and
+  // The lossless bar caps at 24 kHz. content above that is mic/air, and
   // demanding cutoff ≥ nyquist·0.9 would make 96 kHz lossless unreachable.
   const ref = Math.min(nyquist, 24000);
   if (cutoffHz >= Math.max(20000, ref * 0.9) && rolloff === "natural" && hfOccupancy >= 0.3) {
@@ -874,7 +874,7 @@ export function scoreOf(input: {
     // valid corpus peaks at 0.14, so legit content keeps ~8 of these points.
     clarity: 12 * (1 - Math.min(1, input.bbFlatness * 3)),
     // Sustained clipping docks; isolated lossy-decoder overshoots don't count
-    // (they never form runs — see mixDownWithStats).
+    // (they never form runs. see mixDownWithStats).
     clip: input.clipFraction > 0.002 ? -14 : input.clipFraction > 0.0003 ? -6 : 0,
   };
   let total = parts.ceiling + parts.rolloff + parts.air + parts.clarity + parts.clip;
@@ -926,17 +926,17 @@ function resampleFramesToDisplay(
 export function decodeErrorMessage(fileName: string, codec: string): string {
   if (/^alac$/i.test(codec)) {
     return (
-      `Could not decode “${fileName}”. This browser can't decode Apple Lossless (ALAC) — ` +
+      `Could not decode '${fileName}'. This browser can't decode Apple Lossless (ALAC). ` +
       `open this page in Safari, or convert the song to FLAC or WAV.`
     );
   }
   if (/vorbis|opus/i.test(codec)) {
     return (
-      `Could not decode “${fileName}”. Safari can't play ${codec} files — ` +
+      `Could not decode '${fileName}'. Safari can't play ${codec} files. ` +
       `try this song as MP3, M4A, WAV, or FLAC, or open this page in Chrome or Firefox.`
     );
   }
-  return `Could not decode “${fileName}”. Try MP3, M4A, AAC, WAV, FLAC, or OGG.`;
+  return `Could not decode '${fileName}'. Try MP3, M4A, AAC, WAV, FLAC, or OGG.`;
 }
 
 /**
@@ -1049,7 +1049,7 @@ export type DspResult = {
 /**
  * The pure DSP core: regions → STFT → cutoff → class → score → display
  * spectrogram. Runs on the main thread (legacy/fallback) or inside
- * dsp.worker.ts — same function, same numbers, via runDspParallel.
+ * dsp.worker.ts. same function, same numbers, via runDspParallel.
  */
 export async function runDsp(
   mono: Float32Array,
@@ -1107,7 +1107,7 @@ export async function runDsp(
   const spectrogram = resampleFramesToDisplay(
     excerptFrames,
     sampleRate,
-    // Lite path: the local offset is meaningless wall-clock-wise — the spans
+    // Lite path: the local offset is meaningless wall-clock-wise. the spans
     // carry the true position in the original file.
     spans?.excerptStartSec ?? excerpt.start / sampleRate,
     spans?.excerptDurSec ?? (excerpt.end - excerpt.start) / sampleRate,
@@ -1215,7 +1215,7 @@ export type SourceStats = {
  * the loudness envelope (block-anchored strided, like envelopeFromTaps).
  * This is the lite-path-equivalent of mixDownWithStats + pickRegionsFromBuffer
  * + stereoWidth, unified so WAV files too big for decodeAudioData still get
- * every measurement — bounded memory, never a materialized full mono.
+ * every measurement. bounded memory, never a materialized full mono.
  */
 export async function scanSourceStats(
   source: SliceSource,
@@ -1239,7 +1239,7 @@ export async function scanSourceStats(
   let clipRun = 0;
   let mid = 0;
   let side = 0;
-  const CHUNK = 1 << 19; // ~2 MB per channel per chunk — small blob reads
+  const CHUNK = 1 << 19; // ~2 MB per channel per chunk. small blob reads
   const scale = 1 / Math.max(1, ch);
 
   for (let s = 0; s < length; s += CHUNK) {
@@ -1324,7 +1324,7 @@ export async function scanExcerpt(
   const sanitize = (mono: Float32Array) => sanitizeMonoSlice(mono);
 
   if (wav) {
-    // Bounded path: no full decode — the exact PCM frames are read from disk.
+    // Bounded path: no full decode. the exact PCM frames are read from disk.
     onProgress?.("Scanning", 0.25);
     const source = new WavPcmSource(blob, wav);
     const span = Math.min(12, wav.frameCount / wav.sampleRate);
@@ -1408,7 +1408,7 @@ export async function scanExcerpt(
 }
 
 /**
- * File too big for decodeAudioData — name the right remedy by codec family.
+ * File too big for decodeAudioData. name the right remedy by codec family.
  * (WAV never reaches this: over-cap WAVs stream through analyzeStreamingWav.)
  */
 function oversizeMessage(codec: string): string {
@@ -1533,7 +1533,7 @@ export async function analyzeFile(
   throwIfAborted(signal);
   onProgress?.("Reading file", 0.05);
 
-  // decodeAudioData materializes the whole PCM buffer in memory — a huge
+  // decodeAudioData materializes the whole PCM buffer in memory. a huge
   // file is not a slow analysis but a dead tab (especially on ≤4 GB
   // devices, which OOM on far less). Fail loudly instead.
   // Memory-constrained devices get a tighter bound: a 200 MB compressed
@@ -1817,7 +1817,7 @@ export function compareQualityMeasurements(
   const uncertain = songMatch?.status === "uncertain";
 
   let winner: SlotId | "tie" = "tie";
-  // A win needs real bandwidth separation (~900 Hz — above the ~250 Hz
+  // A win needs real bandwidth separation (~900 Hz. above the ~250 Hz
   // smoothing width and measurement jitter). The composite score can veto
   // it, but only by disagreeing with a real margin (≥4 pts): a 1–3 point
   // gap is scoring noise and must not overrule kilohertz of bandwidth.
@@ -1856,13 +1856,13 @@ export function compareQualityMeasurements(
 
   // 16-bit audio padded into a bigger lossless container: the header's bit
   // depth is real, the content is not. Only strict grid fits get flagged
-  // (dithered masters read null — see bitGridCheck). Reported for both
+  // (dithered masters read null. see bitGridCheck). Reported for both
   // sides in every verdict, tie or not: it is a fact about the file.
   const padNote = (side: ComparisonMetrics, slot: string): string => {
     const bits = side.container.bitDepth;
     const eff = side.effectiveBits;
     if (bits === null || typeof eff !== "number" || bits <= eff) return "";
-    return ` File ${slot} stores ${eff}-bit audio in a ${bits}-bit ${side.container.codec} container — the extra bits carry nothing.`;
+    return ` File ${slot} stores ${eff}-bit audio values in the sampled passages of a ${bits}-bit ${side.container.codec} file. This does not establish the original master's bit depth.`;
   };
   const padNotes = () => padNote(a, labels.a) + padNote(b, labels.b);
 
@@ -1870,20 +1870,17 @@ export function compareQualityMeasurements(
   const identityNote = uncertain
     ? songMatch!.overlapSec < 12
       ? " The files share too little audio to confirm they are the same recording."
-      : ` Their loudness contours only partly line up (${Math.round(songMatch!.correlation * 100)}%) — double-check these are the same recording.`
+      : " Their loudness patterns only partly match. Check that these are copies of the same recording."
     : "";
 
   if (different) {
     const detail =
       `The loudness contours of the two files don't line up at any offset ` +
-      `(best match ${Math.max(0, songMatch!.correlation * 100).toFixed(0)}%; two copies of one ` +
-      `recording typically match 90%+). These are most likely different songs — or ` +
-      `versions so different (live take, remix) that their quality can't be compared ` +
-      `like for like — so no winner is declared.`;
+      `well enough to compare their quality. They may be different recordings or substantially different versions. No copy is preferred.`;
     return {
       winner: "tie",
       confidence: "low",
-      headline: "Hold on — these may not be the same song",
+      headline: "These recordings may be different",
       detail,
       cutoffDeltaHz,
       sameLength,
@@ -1896,18 +1893,18 @@ export function compareQualityMeasurements(
       a.sourceLimited && b.sourceLimited
         ? " Both are flagged as source-limited by the detector; that is an estimate, not proof of their encoding history."
         : "";
-    // When the ceilings visibly differ, say so with both numbers — "both
+    // When the ceilings visibly differ, say so with both numbers. "both
     // reach about X" is a lie the spectrogram immediately contradicts.
     let detail =
       absDelta >= 500
-        ? `File ${labels.a} reaches ${fmtK(a.cutoffHz)} and File ${labels.b} ${fmtK(b.cutoffHz)}, but the experimental scores are close (${a.score.toFixed(0)} vs ${b.score.toFixed(0)}) — so these measurements do not support a preference. Trust the A/B preview below over either number.${sourceNote}`
-        : `Both reach about ${fmtK(a.cutoffHz)}. Other differences may remain undetected.${sourceNote}`;
+        ? `File ${labels.a} reaches ${fmtK(a.cutoffHz)} and File ${labels.b} ${fmtK(b.cutoffHz)}. The experimental scores are close (${a.score.toFixed(0)} vs ${b.score.toFixed(0)}), so these measurements do not support a preference.${sourceNote}`
+        : `Both reach about ${fmtK(a.cutoffHz)} in the measured passages. Other differences may remain undetected.${sourceNote}`;
     detail += padNotes();
     detail += identityNote;
     return {
       winner,
       confidence,
-      headline: "No winner — these copies are essentially the same quality",
+      headline: "No clear quality difference detected",
       detail,
       cutoffDeltaHz,
       sameLength,
@@ -1917,13 +1914,13 @@ export function compareQualityMeasurements(
 
   // "More air kept" is only true when the winner's ceiling is meaningfully
   // higher (same 500 Hz bar as the tie text). A score-driven win over an
-  // equal or higher ceiling must say why it won instead — and still name
+  // equal or higher ceiling must say why it won instead. and still name
   // both ceilings truthfully.
   const airLead = better.cutoffHz - worse.cutoffHz;
   const bandwidth =
     airLead >= 500
-      ? `${fmtK(better.cutoffHz)} of estimated bandwidth versus ${fmtK(worse.cutoffHz)} — ${fmtK(airLead)} more measured high-frequency reach.`
-      : `File ${betterSlot} reaches ${fmtK(better.cutoffHz)} and File ${worseSlot} ${fmtK(worse.cutoffHz)}, so bandwidth alone doesn't decide this — ` +
+      ? `${fmtK(better.cutoffHz)} of estimated bandwidth versus ${fmtK(worse.cutoffHz)}. ${fmtK(airLead)} more measured high-frequency reach.`
+      : `File ${betterSlot} reaches ${fmtK(better.cutoffHz)} and File ${worseSlot} ${fmtK(worse.cutoffHz)}, so bandwidth alone doesn't decide this. ` +
         (better.rolloff === "natural" && worse.rolloff !== "natural"
           ? `File ${betterSlot} ends in a clean natural rolloff where File ${worseSlot} hits ${worse.rolloff === "brickwall" ? "a brickwall low-pass" : "a steep rolloff"}, and it scores higher overall (${better.score.toFixed(0)} vs ${worse.score.toFixed(0)}).`
           : `File ${betterSlot} scores clearly higher overall (${better.score.toFixed(0)} vs ${worse.score.toFixed(0)}).`);
@@ -1950,7 +1947,7 @@ export function compareQualityMeasurements(
       : "";
 
   // With verified alignment, differing lengths are just trims/different
-  // masters — the offset is measured and handled, not a same-song doubt.
+  // masters. the offset is measured and handled, not a same-song doubt.
   const lengthNote =
     songMatch?.status === "same" && Math.abs(songMatch.lagSec) >= 1
       ? ` The copies line up ~${Math.abs(songMatch.lagSec).toFixed(1)} s apart (trimmed differently); previews and the comparison follow the same musical position.`
@@ -1961,7 +1958,7 @@ export function compareQualityMeasurements(
   return {
     winner,
     confidence,
-    headline: `Winner: File ${betterSlot} — “${truncName(better.fileName)}”`,
+    headline: `Winner: File ${betterSlot}. '${truncName(better.fileName)}'`,
     detail: `${bandwidth}${wall}${mismatch}${padNotes()}${uncertain ? identityNote : lengthNote}`,
     cutoffDeltaHz,
     sameLength,
