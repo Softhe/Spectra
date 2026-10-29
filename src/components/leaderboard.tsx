@@ -32,18 +32,19 @@ export function Leaderboard({
   onPairFocus,
 }: {
   ranking: Ranking;
-  /** analysis id → (refined) analysis for display fields. */
+  /** analysis id → analysis (refined values patched in) for display fields. */
   filesById: Record<string, Analysis>;
   slotOfId: Record<string, SlotId | undefined>;
   focusPair: [string, string] | null;
-  /** Sharing-scoped: refinement note shows which pairs verified as same song. */
+  /** Present when the copies were re-measured over their shared passages. */
   refinement: Refinement | null;
   onPairStart: (idA: string, idB: string) => void;
   onPairFocus: (idA: string, idB: string) => void;
 }) {
-  const rows = ranking.order.map((fid) => ({ fid, analysis: filesById[fid] })).filter(
-    (r) => r.analysis,
-  );
+  const rows = ranking.order
+    .map((fid) => ({ fid, analysis: filesById[fid] }))
+    .filter((r) => r.analysis);
+  const rankedCount = rows.filter((r) => !ranking.outsiders.has(r.fid)).length;
   const pairs: [string, string][] = [];
   for (let i = 0; i < rows.length; i++) {
     for (let j = i + 1; j < rows.length; j++) {
@@ -59,7 +60,7 @@ export function Leaderboard({
           <p className="mt-0.5 text-xs text-muted">
             Every pair judged with the same rules as the headline verdict — win +1 point, tie +½.
             {refinement
-              ? " Shared-window refinement is in — ceiling values reflect the re-measured common window."
+              ? " Numbers come from the passages every copy shares."
               : " Bandwidth margins decide close calls."}
           </p>
         </div>
@@ -69,7 +70,7 @@ export function Leaderboard({
           const slot = slotOfId[row.fid];
           const points = ranking.pointsById[row.fid] ?? 0;
           const wins = rows
-            .filter((other) => other.fid !== row.fid)
+            .filter((other) => other.fid !== row.fid && !ranking.outsiders.has(other.fid))
             .map((other) => pairComparison(ranking, row.fid, other.fid))
             .filter((c) => c && c.winner === "a").length;
           return (
@@ -77,32 +78,65 @@ export function Leaderboard({
               key={row.fid}
               className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 py-3 last:border-b-0"
             >
-              <span className="w-6 font-mono text-sm text-faint tabular-nums">{rank + 1}.</span>
+              <span className="w-6 font-mono text-sm text-faint tabular-nums">
+                {ranking.outsiders.has(row.fid) ? "—" : `${rank + 1}.`}
+              </span>
               {slot && (
-                <span className={cn("font-mono text-xs tracking-widest uppercase", TRACE_CLASS[slot])}>
+                <span
+                  className={cn("font-mono text-xs tracking-widest uppercase", TRACE_CLASS[slot])}
+                >
                   {SLOT_LABELS[slot]}
                 </span>
               )}
-              <span className="min-w-0 flex-1 truncate text-sm text-fg" title={row.analysis.fileName}>
+              <span
+                className="min-w-0 flex-1 truncate text-sm text-fg"
+                title={row.analysis.fileName}
+              >
                 {row.analysis.fileName}
               </span>
-              <span className="font-mono text-xs text-muted tabular-nums" title="Head-to-head points">
-                {points.toFixed(1).replace(".0", "")} pt
+              {ranking.outsiders.has(row.fid) ? (
+                <span
+                  className="font-mono text-xs text-warn"
+                  title="No eligible comparison with matching identity and shared measurements is available"
+                >
+                  comparison unavailable · unranked
+                </span>
+              ) : (
+                <>
+                  <span
+                    className="font-mono text-xs text-muted tabular-nums"
+                    title="Head-to-head points"
+                  >
+                    {points.toFixed(1).replace(".0", "")} pt
+                  </span>
+                  <span
+                    className="font-mono text-xs text-faint tabular-nums"
+                    title="Pairs won outright"
+                  >
+                    {wins}/{rankedCount - 1} wins
+                  </span>
+                </>
+              )}
+              <span className="font-mono text-xs text-fg tabular-nums">
+                {row.analysis.score.toFixed(0)}
               </span>
-              <span className="font-mono text-xs text-faint tabular-nums" title="Pairs won outright">
-                {wins}/{rows.length - 1} wins
+              <span className="font-mono text-xs text-muted tabular-nums">
+                {formatHz(row.analysis.cutoffHz)}
               </span>
-              <span className="font-mono text-xs text-fg tabular-nums">{row.analysis.score.toFixed(0)}</span>
-              <span className="font-mono text-xs text-muted tabular-nums">{formatHz(row.analysis.cutoffHz)}</span>
               {slot && (
                 <Button
                   variant={focusPair && focusPair[0] === row.fid ? "default" : "outline"}
                   size="sm"
                   onClick={() => {
-                    const other = rows.find((r) => r.fid !== row.fid);
+                    // The leader faces the runner-up; everyone else faces the leader.
+                    const other = rank === 0 ? rows[1] : rows[0];
                     if (other) onPairFocus(row.fid, other.fid);
                   }}
-                  aria-label={`Compare ${SLOT_LABELS[slot]} against the next best file`}
+                  aria-label={
+                    rank === 0
+                      ? `Compare ${SLOT_LABELS[slot]} against the runner-up`
+                      : `Compare ${SLOT_LABELS[slot]} against the leader`
+                  }
                 >
                   Focus
                 </Button>

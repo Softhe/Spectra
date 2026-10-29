@@ -13,10 +13,12 @@ import type { RefinedMetrics } from "./refine";
 export function analysisWithRefined(
   a: Analysis,
   ref?: RefinedMetrics,
+  requireShared = false,
 ): Analysis {
-  if (!ref) return a;
+  if (!ref) return requireShared ? { ...a, comparisonCoverage: { status: "unavailable" } } : a;
   return {
     ...a,
+    comparisonCoverage: ref.coverage,
     cutoffHz: ref.cutoffHz,
     rolloff: ref.rolloff,
     brickwallHz: ref.brickwallHz,
@@ -36,6 +38,8 @@ export type Ranking = {
   pointsById: Record<string, number>;
   /** Pair verdicts keyed `idA|idb` in the arguments' order. */
   pairwise: Record<string, Comparison>;
+  /** Files that aren't the same song as the group: unscored, listed last. */
+  outsiders: Set<string>;
 };
 
 /**
@@ -47,10 +51,14 @@ export type Ranking = {
 export function rankedIds(
   files: Analysis[],
   refined?: Record<string, RefinedMetrics>,
+  outsiders: Set<string> = new Set(),
+  requireShared = false,
 ): Ranking {
+  outsiders = new Set(outsiders);
+  const eligible = new Set<string>();
   const patched = files.map((f) => ({
     f,
-    v: analysisWithRefined(f, refined?.[f.id]),
+    v: analysisWithRefined(f, refined?.[f.id], requireShared),
   }));
   const pairwise: Record<string, Comparison> = {};
   const pointsById: Record<string, number> = {};
@@ -61,6 +69,18 @@ export function rankedIds(
       const cj = patched[j]!;
       const c = compareAnalyses(ci.v, cj.v);
       pairwise[`${ci.f.id}|${cj.f.id}`] = c;
+      // A different song scores nothing: a win against it says nothing
+      // about which copy of THIS song is better, and a guarded tie would
+      // hand out points just for loading it.
+      if (
+        outsiders.has(ci.f.id) ||
+        outsiders.has(cj.f.id) ||
+        c.outcome === "not-comparable" ||
+        c.reasons.includes("shared-measurement-unavailable")
+      )
+        continue;
+      eligible.add(ci.f.id);
+      eligible.add(cj.f.id);
       if (c.winner === "a") pointsById[ci.f.id]! += 1;
       else if (c.winner === "b") pointsById[cj.f.id]! += 1;
       else {
@@ -69,34 +89,39 @@ export function rankedIds(
       }
     }
   }
+  for (const { f } of patched) if (!eligible.has(f.id)) outsiders.add(f.id);
   const order = [...patched]
     .sort(
       (x, y) =>
+        Number(outsiders.has(x.f.id)) - Number(outsiders.has(y.f.id)) ||
         pointsById[y.f.id]! - pointsById[x.f.id]! ||
-        y.f.score - x.f.score ||
-        y.f.cutoffHz - x.f.cutoffHz ||
+        y.v.score - x.v.score ||
+        y.v.cutoffHz - x.v.cutoffHz ||
         x.f.fileName.localeCompare(y.f.fileName),
     )
     .map((p) => p.f.id);
-  return { order, pointsById, pairwise };
+  return { order, pointsById, pairwise, outsiders };
 }
 
 /**
  * The verdict for a pair in the (a, b) argument order the caller cares
- * about, from the ranking's pairwise table (which ran each pair once).
+ * about, from the ranking's pairwise table (which ran each pair once). The
+ * decision fields are re-oriented; the prose (headline/detail) is written
+ * for the table's own order and slot-agnostic labels, so callers that show
+ * text must run compareAnalyses with real labels instead.
  */
-export function pairComparison(
-  ranking: Ranking,
-  idA: string,
-  idB: string,
-): Comparison | null {
+export function pairComparison(ranking: Ranking, idA: string, idB: string): Comparison | null {
   if (idA === idB) return null;
   const straight = ranking.pairwise[`${idA}|${idB}`];
   if (straight) return straight;
   const flipped = ranking.pairwise[`${idB}|${idA}`];
   if (!flipped) return null;
   // Re-express the flipped verdict in the caller's orientation.
-  const winner =
-    flipped.winner === "a" ? "b" : flipped.winner === "b" ? "a" : "tie";
-  return { ...flipped, winner };
+  const winner = flipped.winner === "a" ? "b" : flipped.winner === "b" ? "a" : "tie";
+  return {
+    ...flipped,
+    winner,
+    cutoffDeltaHz: -flipped.cutoffDeltaHz,
+    songMatch: flipped.songMatch && { ...flipped.songMatch, lagSec: -flipped.songMatch.lagSec },
+  };
 }

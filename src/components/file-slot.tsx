@@ -14,6 +14,7 @@ import {
   formatKbps,
   formatSampleRate,
 } from "@/lib/audio/format";
+import type { RefinedMetrics } from "@/lib/audio/refine";
 import type { Analysis, SlotId, SpectrogramData } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
@@ -60,9 +61,7 @@ type Props = {
   /** Double-blind mode: hide identity, numbers, and pictures until reveal. */
   masked?: boolean;
   /** Shared-window re-measurement, when the refinement pass succeeded. */
-  refinedCutoffHz?: number | null;
-  /** Re-computed quality class over that window (pairs with refinedCutoffHz). */
-  refinedClass?: Analysis["qualityClass"] | null;
+  refined?: RefinedMetrics | null;
   loopWindow?: { start: number; length: number } | null;
   /** Excerpt re-scan at the playhead (disabled while another scan runs). */
   scanState?: ScanState;
@@ -90,8 +89,7 @@ export function FileSlot({
   onClear,
   onRejectedDrop,
   masked,
-  refinedCutoffHz,
-  refinedClass,
+  refined,
   loopWindow,
   scanState,
   onScan,
@@ -242,8 +240,9 @@ export function FileSlot({
 
   return (
     <section
-      aria-label={`${label}${outcome === "win" ? " (winner)" : outcome === "lose" ? " (runner-up)" : ""}`}
+      aria-label={`${label}${outcome === "win" ? " (preferred)" : outcome === "lose" ? " (other copy)" : ""}`}
       data-drop-over={over || undefined}
+      style={masked ? { transition: "none" } : undefined}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -262,43 +261,30 @@ export function FileSlot({
           {outcome === "win" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-win px-2 py-0.5 text-[10px] font-semibold tracking-wide text-win-fg uppercase">
               <Trophy className="size-3" />
-              Winner
+              Preferred
             </span>
           )}
           {outcome === "lose" && (
             <span className="rounded-full bg-bg-subtle px-2 py-0.5 text-[10px] font-medium tracking-wide text-muted uppercase">
-              Runner-up
+              Other copy
             </span>
           )}
           {outcome === "tie" && (
             <span className="rounded-full bg-bg-subtle px-2 py-0.5 text-[10px] font-medium tracking-wide text-muted uppercase">
-              Tie
+              No preference
             </span>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {state.status === "ready" && !masked && (
-            <span
-              className={cn(
-                "rounded-md px-2 py-0.5 font-mono text-[11px] tabular-nums",
-                outcome === "win" ? "bg-win/15 text-fg" : "bg-bg-subtle text-muted",
-              )}
-              title="Composite quality score out of 100"
-            >
-              {state.analysis.score.toFixed(0)}/100
+          {state.status === "ready" && state.analysis.liteAnalysis && !masked && (
+            <span className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-xs text-warn">
+              Lite
             </span>
           )}
-          {state.status === "ready" &&
-            state.analysis.liteAnalysis &&
-            !masked && (
-              <span className="rounded-md bg-bg-subtle px-2 py-0.5 font-mono text-xs text-warn">
-                Lite
-              </span>
-            )}
-          {typeof refinedCutoffHz === "number" && (
+          {state.status === "ready" && refinedChanged(state.analysis, refined) && (
             <span
               className="rounded-md bg-info/15 px-2 py-0.5 font-mono text-[10px] text-info"
-              title="Re-measured over a shared, envelope-aligned window so both files are judged on identical musical material"
+              title="Re-measured over common passages; at least one displayed measurement changed"
             >
               Refined
             </span>
@@ -337,14 +323,14 @@ export function FileSlot({
         <div className="flex min-h-52 flex-1 flex-col items-center justify-center gap-3 px-4">
           <AudioLines className="size-6 text-muted" />
           <p className="max-w-full text-center text-sm text-fg [overflow-wrap:anywhere]">
-            Reading {state.fileName}
+            Reading {masked ? "hidden clip" : state.fileName}
           </p>
           <p aria-live="polite" className="font-mono text-xs text-muted">
             {state.phase}
           </p>
           <div
             role="progressbar"
-            aria-label={`Analyzing ${state.fileName}`}
+            aria-label={masked ? "Analyzing hidden clip" : `Analyzing ${state.fileName}`}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={Math.round(state.progress * 100)}
@@ -445,6 +431,7 @@ export function FileSlot({
             label={label}
             position={position}
             duration={mediaDuration ?? state.analysis.durationSec}
+            hideTotal={masked}
             onSeek={(t) => {
               const el = audioRef.current;
               if (el && Number.isFinite(t)) {
@@ -467,8 +454,8 @@ export function FileSlot({
             <div className="flex h-48 flex-col items-center justify-center gap-2 rounded-md bg-bg-inset text-center sm:h-64">
               <EyeOff className="size-5 text-faint" />
               <p className="max-w-60 text-xs leading-relaxed text-muted">
-                Spectrogram and measurements are hidden for this round — reveal to see who kept
-                the air.
+                Spectrogram and measurements are hidden for this round — reveal to see who kept the
+                air.
               </p>
             </div>
           ) : (
@@ -518,16 +505,20 @@ export function FileSlot({
               <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm min-[360px]:grid-cols-2">
                 <Stat
                   label="Spectral ceiling"
-                  value={formatHz(refinedCutoffHz ?? state.analysis.cutoffHz)}
+                  value={formatHz(refined?.cutoffHz ?? state.analysis.cutoffHz)}
                   emphasize
-                  note={typeof refinedCutoffHz === "number" ? "shared window" : undefined}
+                  note={
+                    refined && Math.abs(refined.cutoffHz - state.analysis.cutoffHz) >= 50
+                      ? `${formatHz(state.analysis.cutoffHz)} before lining up`
+                      : undefined
+                  }
                 />
                 <Stat
-                  label="True class"
-                  value={QUALITY_LABEL[refinedClass ?? state.analysis.qualityClass]}
+                  label="Spectral character"
+                  value={QUALITY_LABEL[refined?.qualityClass ?? state.analysis.qualityClass]}
                   note={
-                    refinedClass && refinedClass !== state.analysis.qualityClass
-                      ? "judged on the shared window"
+                    refined && refined.qualityClass !== state.analysis.qualityClass
+                      ? "judged on the shared passages"
                       : undefined
                   }
                 />
@@ -543,7 +534,10 @@ export function FileSlot({
                   </p>
                 )}
                 <dl className="grid grid-cols-1 gap-x-4 gap-y-3 pb-4 min-[360px]:grid-cols-2">
-                  <Stat label="Container bitrate" value={formatKbps(state.analysis.containerKbps)} />
+                  <Stat
+                    label="Container bitrate"
+                    value={formatKbps(state.analysis.containerKbps)}
+                  />
                   <Stat
                     label="Header bitrate"
                     value={
@@ -559,7 +553,7 @@ export function FileSlot({
                       state.analysis.effectiveBits != null &&
                       typeof state.analysis.container.bitDepth === "number" &&
                       state.analysis.effectiveBits < state.analysis.container.bitDepth
-                        ? "16-bit content padded into the bigger container"
+                        ? `${state.analysis.effectiveBits}-bit content padded into the bigger container`
                         : undefined
                     }
                   />
@@ -598,6 +592,16 @@ export function FileSlot({
   );
 }
 
+/** Whether re-measuring over the shared passages moved any shown number. */
+function refinedChanged(a: Analysis, r: RefinedMetrics | null | undefined): boolean {
+  return Boolean(
+    r &&
+    (Math.abs(r.cutoffHz - a.cutoffHz) >= 50 ||
+      Math.round(r.score) !== Math.round(a.score) ||
+      r.qualityClass !== a.qualityClass),
+  );
+}
+
 /** Lossless bit depth line: container vs the integer grid the content sits on. */
 function bitDepthLabel(a: Analysis): string {
   const bits = a.container.bitDepth;
@@ -613,8 +617,11 @@ function SeekBar({
   label,
   position,
   duration,
+  hideTotal,
   onSeek,
 }: {
+  /** Blind rounds: copies of one song often differ in length, which would name them. */
+  hideTotal?: boolean;
   label: string;
   position: number;
   duration: number;
@@ -654,7 +661,7 @@ function SeekBar({
         />
       </Slider.Root>
       <span className="w-10 shrink-0 text-right font-mono text-[11px] text-faint tabular-nums">
-        {formatDuration(safeDuration)}
+        {hideTotal ? "–:––" : formatDuration(safeDuration)}
       </span>
     </div>
   );

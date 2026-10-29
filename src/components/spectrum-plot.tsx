@@ -10,12 +10,7 @@ const GUTTER_PX = 40;
 
 const TRACE_VARS = ["--color-trace-a", "--color-trace-b", "--color-trace-c", "--color-trace-d"];
 const TRACE_CLASS = ["text-trace-a", "text-trace-b", "text-trace-c", "text-trace-d"];
-const TRACE_BORDER = [
-  "border-trace-a",
-  "border-trace-b",
-  "border-trace-c",
-  "border-trace-d",
-];
+const TRACE_BORDER = ["border-trace-a", "border-trace-b", "border-trace-c", "border-trace-d"];
 const TRACE_FALLBACKS = ["#8fbfb4", "#c4b49a", "#a8a4c8", "#c8a4b0"];
 const SLOTS: SlotId[] = ["a", "b", "c", "d"];
 
@@ -133,8 +128,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
       // Below the ceilings the traces overlap almost exactly; the winner
       // paints last so it is never hidden, over slightly faded losers.
       // Without a winner (tie / identical) neither trace is faded.
-      const decided =
-        winnerSlot != null && traces.some((t) => t.slot === winnerSlot);
+      const decided = winnerSlot != null && traces.some((t) => t.slot === winnerSlot);
       if (decided && winnerSlot != null) {
         traces.sort((t1, t2) => (t1.slot === winnerSlot ? 1 : t2.slot === winnerSlot ? -1 : 0));
       }
@@ -212,7 +206,8 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
         <div>
           <h2 className="text-sm font-medium text-fg">Average spectrum</h2>
           <p className="mt-0.5 text-xs text-muted">
-            Level (dB) versus frequency · vertical range auto-scales. A cliff shows lost highs.
+            Base-analysis spectrum. Comparison markers may use shared-passage measurements. A cutoff
+            does not establish an original bitrate.
           </p>
         </div>
         <div className="flex flex-wrap gap-3 font-mono text-xs sm:gap-4">
@@ -238,7 +233,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
           ref={canvasRef}
           className="block size-full"
           role="img"
-          aria-label={`Average spectrum plot.${files.map((f, i) => f ? ` File ${SLOTS[i]!.toUpperCase()} ceiling ${formatHz(f.cutoffHz)}.` : "").join("")}`}
+          aria-label={`Average spectrum plot.${files.map((f, i) => (f ? ` File ${SLOTS[i]!.toUpperCase()} ceiling ${formatHz(f.cutoffHz)}.` : "")).join("")}`}
         />
       </div>
       {/* Labels sit at the true frequency positions (the axis runs to the

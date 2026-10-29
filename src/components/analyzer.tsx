@@ -1,4 +1,4 @@
-import { AudioLines, Eye, EyeOff, Info } from "lucide-react";
+import { AudioLines, Eye, EyeOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
 import {
@@ -12,14 +12,10 @@ import { CompareTable, HowTo, Verdict } from "@/components/panels";
 import { Leaderboard } from "@/components/leaderboard";
 import { SpectrumPlot } from "@/components/spectrum-plot";
 import { Button } from "@/components/ui/button";
-import {
-  analyzeFile,
-  CancelledError,
-  scanExcerpt,
-} from "@/lib/audio/analyze";
-import { analysisWithRefined, pairComparison, rankedIds } from "@/lib/audio/rank";
+import { analyzeFile, CancelledError, compareAnalyses, scanExcerpt } from "@/lib/audio/analyze";
+import { analysisWithRefined, rankedIds } from "@/lib/audio/rank";
 import type { Ranking } from "@/lib/audio/rank";
-import { refineAnalyses } from "@/lib/audio/refine";
+import { alignGroup, refineAnalyses } from "@/lib/audio/refine";
 import type { Refinement } from "@/lib/audio/refine";
 import { makeDemoFiles } from "@/lib/audio/demo";
 import { formatDuration } from "@/lib/audio/format";
@@ -79,6 +75,7 @@ function etaLabel(elapsedSec: number, progress: number): string {
 export function Analyzer() {
   const [slots, setSlots] = useState<Record<SlotId, SlotState>>(initialSlots);
   const [demoBusy, setDemoBusy] = useState(false);
+  const [visibleSlotCount, setVisibleSlotCount] = useState(2);
   const gens = useRef<Partial<Record<SlotId, number>>>({});
   const urls = useRef<Partial<Record<SlotId, string | null>>>({});
   const controllers = useRef<Partial<Record<SlotId, AbortController | null>>>({});
@@ -228,10 +225,7 @@ export function Analyzer() {
 
   // ---- ready files -----------------------------------------------------------
 
-  const readySlots = useMemo(
-    () => SLOT_KEYS.filter((id) => slots[id].status === "ready"),
-    [slots],
-  );
+  const readySlots = useMemo(() => SLOT_KEYS.filter((id) => slots[id].status === "ready"), [slots]);
   const readySig = useMemo(
     () =>
       readySlots
@@ -242,10 +236,14 @@ export function Analyzer() {
   );
   const readyFiles: Analysis[] = useMemo(
     () => readySlots.map((id) => (slots[id] as { analysis: Analysis }).analysis),
-    [readySlots, slots], // eslint-disable-line react-hooks/exhaustive-deps
+    [readySlots, slots],
   );
 
-  // ---- shared-window refinement (fair comparison) -----------------------------
+  // ---- alignment + shared-window refinement (fair comparison) ----------------
+
+  // Envelope-only, so it is instant and drives pair-aligned previews even
+  // when re-measuring is skipped (copies already aligned) or fails.
+  const alignment = useMemo(() => alignGroup(readyFiles), [readySig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [refinement, setRefinement] = useState<Refinement | null>(null);
   const [refineStatus, setRefineStatus] = useState<{ phase: string; amount: number } | null>(null);
@@ -258,39 +256,56 @@ export function Analyzer() {
     refineAbort.current?.abort();
     setRefinement(null);
     setRefineStatus(null);
-    if (files.length < 2 || files.length > 4) return;
+    if (files.length < 2 || !alignment) return;
     const controller = new AbortController();
     refineAbort.current = controller;
-    setRefineStatus({ phase: "Same-song check", amount: 0.02 });
-    refineAnalyses(
-      files,
-      (phase, amount) => {
-        if (refineGen.current !== myGen) return;
-        setRefineStatus({ phase, amount });
-      },
-      controller.signal,
-    )
+    // Re-measuring decodes every file again: on serial devices it waits its
+    // turn behind (and never alongside) slot analyses.
+    enqueueAnalysis(() => {
+      if (refineGen.current !== myGen) throw new CancelledError();
+      return refineAnalyses(
+        files,
+        alignment,
+        (phase, amount) => {
+          if (controller.signal.aborted || refineGen.current !== myGen) return;
+          setRefineStatus({ phase, amount });
+        },
+        controller.signal,
+      );
+    })
       .then((res) => {
-        if (refineGen.current !== myGen) return;
+        if (controller.signal.aborted || refineGen.current !== myGen) return;
         setRefineStatus(null);
         setRefinement(res);
       })
       .catch((err) => {
-        if (refineGen.current !== myGen) return;
+        if (controller.signal.aborted || refineGen.current !== myGen) return;
         setRefineStatus(null);
         if (!(err instanceof CancelledError)) {
-          // Refinement is pure upside; the base comparison stays authoritative.
+          // Keep alignment/playback; unavailable shared measurements suppress a preference.
           console.warn("refinement failed", err);
         }
       });
+    return () => {
+      controller.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readySig]);
 
   // ---- ranking ----------------------------------------------------------------
 
   const ranking: Ranking | null = useMemo(
-    () => (readyFiles.length >= 2 ? rankedIds(readyFiles, refinement?.refined) : null),
-    [readySig, refinement], // eslint-disable-line react-hooks/exhaustive-deps
+    () => {
+      if (readyFiles.length < 2) return null;
+      // Files the alignment rules out as a different song are listed, not ranked.
+      const outsiders = new Set(
+        Object.entries(alignment?.matchById ?? {})
+          .filter(([, m]) => m.status !== "same")
+          .map(([fid]) => fid),
+      );
+      return rankedIds(readyFiles, refinement?.refined, outsiders, true);
+    },
+    [readySig, refinement, alignment], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const slotOfId = useMemo(() => {
@@ -300,16 +315,18 @@ export function Analyzer() {
       if (a) map[a.id] = id;
     }
     return map;
-  }, [readySig]); // eslint-disable-line react-hooks/exhaustive-deps
+    // `slots`, not readySig: a swap moves files between slots without
+    // changing the set of ready ids, and every label must follow the move.
+  }, [slots]);
 
   const filesById = useMemo(() => {
     const map: Record<string, Analysis> = {};
     for (const id of SLOT_KEYS) {
       const a = analysisOf(slots[id]);
-      if (a) map[a.id] = a;
+      if (a) map[a.id] = analysisWithRefined(a, refinement?.refined[a.id], true);
     }
     return map;
-  }, [readySig]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readySig, refinement]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const displayFiles: (Analysis | null)[] = useMemo(
     () =>
@@ -354,29 +371,26 @@ export function Analyzer() {
   const slotsRef = useRef(slots);
   slotsRef.current = slots;
 
-  // Same bytes in both focused slots: a faux tie helps nobody — say so.
-  const identical = useMemo(
-    () =>
-      Boolean(
-        pairAnalyses &&
-          ((pairAnalyses.a.cacheKey &&
-            pairAnalyses.b.cacheKey &&
-            pairAnalyses.a.cacheKey === pairAnalyses.b.cacheKey) ||
-            (!pairAnalyses.a.cacheKey &&
-              !pairAnalyses.b.cacheKey &&
-              pairAnalyses.a.fileName === pairAnalyses.b.fileName &&
-              pairAnalyses.a.fileSize === pairAnalyses.b.fileSize)),
-      ),
-    [pairAnalyses],
-  );
+  // The focused pair's verdict, refined numbers patched in and written with
+  // the slots' real letters (a C-vs-A pair must not read "File A wins" about
+  // File C). Same rules as the leaderboard's pairwise table, so they agree.
+  const pairDisplay = useMemo(() => {
+    if (!pairAnalyses) return null;
+    return {
+      a: analysisWithRefined(pairAnalyses.a, refinement?.refined[pairAnalyses.a.id], true),
+      b: analysisWithRefined(pairAnalyses.b, refinement?.refined[pairAnalyses.b.id], true),
+    };
+  }, [pairAnalyses, refinement]);
 
-  const comparison: Comparison | null = useMemo(
-    () =>
-      ranking && focusPair && !identical && pairAnalyses
-        ? pairComparison(ranking, focusPair[0], focusPair[1])
-        : null,
-    [ranking, focusPair, identical, pairAnalyses],
-  );
+  const comparison: Comparison | null = useMemo(() => {
+    if (!pairDisplay) return null;
+    const la = slotOfId[pairDisplay.a.id];
+    const lb = slotOfId[pairDisplay.b.id];
+    return compareAnalyses(pairDisplay.a, pairDisplay.b, {
+      a: (la ?? "a").toUpperCase(),
+      b: (lb ?? "b").toUpperCase(),
+    });
+  }, [pairDisplay, slotOfId]);
 
   // ---- blind test -----------------------------------------------------------------
 
@@ -386,22 +400,38 @@ export function Analyzer() {
   // ready files at random; the displaced files land in the vacated slots.
   const [blind, setBlind] = useState<{ revealed: boolean } | null>(null);
   const blindHidden = blind != null && !blind.revealed;
+  const blindHiddenRef = useRef(blindHidden);
+  blindHiddenRef.current = blindHidden;
+  useEffect(() => {
+    // Clear a previous filename from browser/OS media controls before a blind round.
+    if (blindHidden && "mediaSession" in navigator) navigator.mediaSession.metadata = null;
+  }, [blindHidden]);
 
   const startBlindRound = useCallback(() => {
     const ready = SLOT_KEYS.filter((id) => slotsRef.current[id].status === "ready");
     if (ready.length < 2) return;
-    const shuffled = [...ready].sort(() => Math.random() - 0.5);
-    const sx = shuffled[0]!;
-    const sy = shuffled[1]!;
-    const idX = (slotsRef.current[sx] as { analysis: Analysis }).analysis.id;
-    const idY = (slotsRef.current[sy] as { analysis: Analysis }).analysis.id;
-    // Stage both chosen files into slots a and b, then hide the assignment
-    // behind a coin flip so neither reveal order nor layout leaks identity.
-    if (sx !== "a") swapSlots(sx, "a");
-    if (sy !== "b") swapSlots(sy, "b");
-    const flipped = Math.random() < 0.5;
-    if (flipped) swapSlots("a", "b");
-    setFocusPair(flipped ? [idY, idX] : [idX, idY]);
+    // Fisher–Yates: sort() with a random comparator is biased.
+    const shuffled = [...ready];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+    }
+    const idX = (slotsRef.current[shuffled[0]!] as { analysis: Analysis }).analysis.id;
+    const idY = (slotsRef.current[shuffled[1]!] as { analysis: Analysis }).analysis.id;
+    // Stage the two picks into slots a and b in shuffled order. Positions are
+    // tracked through each swap: moving X into "a" can displace Y (when Y
+    // sat in "a"), so Y's slot is looked up again before the second swap.
+    const where: Record<SlotId, string | null> = { a: null, b: null, c: null, d: null };
+    for (const id of SLOT_KEYS) where[id] = analysisOf(slotsRef.current[id])?.id ?? null;
+    const stage = (fid: string, to: SlotId) => {
+      const from = SLOT_KEYS.find((id) => where[id] === fid)!;
+      if (from === to) return;
+      swapSlots(from, to);
+      [where[from], where[to]] = [where[to], where[from]];
+    };
+    stage(idX, "a");
+    stage(idY, "b");
+    setFocusPair([idX, idY]);
     setAbPlaying(null);
     switchPending.current = 0;
     matchRef.current = {};
@@ -451,7 +481,7 @@ export function Analyzer() {
     switchPending.current = 0;
     matchRef.current = {};
     setLoopOn(false);
-  }, [readySig]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readySig]);
 
   // Keep every preview element on the global level, including freshly
   // mounted ones after a file loads.
@@ -498,8 +528,10 @@ export function Analyzer() {
           const track = analysesRef.current[id] ?? null;
           if (track) {
             navigator.mediaSession.metadata = new MediaMetadata({
-              title: track.fileName,
-              artist: `Spectra · ${SLOT_LABELS[id]}`,
+              title: blindHiddenRef.current ? `Clip ${id === "a" ? 1 : 2}` : track.fileName,
+              artist: blindHiddenRef.current
+                ? "Spectra · blind test"
+                : `Spectra · ${SLOT_LABELS[id]}`,
               album: "Same song, different sources",
             });
           }
@@ -556,7 +588,7 @@ export function Analyzer() {
       }
     };
     // Subscribed once; headset handlers reach abSwitch through its ref.
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // Fade bookkeeping so rapid successive switches never strand audio:
   // only the newest fade on an element may pause it.
@@ -618,15 +650,15 @@ export function Analyzer() {
   const loopOnRef = useRef(loopOn);
   loopOnRef.current = loopOn;
   // Anchor in the focused pair's FIRST member's time base. Pair-aligned
-  // offsets come from the refinement's envelope alignment (0 without it), so
-  // a trimmed copy still loops over the identical musical take.
+  // offsets come from the group's envelope alignment (0 for files it could
+  // not place), so a trimmed copy still loops over the identical take.
   const loopAnchorSec = useRef(30);
 
-  const refinementRef = useRef<Refinement | null>(null);
-  refinementRef.current = refinement;
+  const alignmentRef = useRef(alignment);
+  alignmentRef.current = alignment;
 
   const offsetOf = useCallback((fid: string | undefined): number => {
-    return fid ? (refinementRef.current?.offsetByKey[fid] ?? 0) : 0;
+    return fid ? (alignmentRef.current?.offsetById[fid] ?? 0) : 0;
   }, []);
 
   /** The pinned loop window for one slot, expressed in that slot's own time. */
@@ -643,7 +675,7 @@ export function Analyzer() {
       );
       return { start, length: LOOP_SEC };
     },
-    [offsetOf], // eslint-disable-line react-hooks/exhaustive-deps
+    [offsetOf],
   );
 
   const toggleLoop = useCallback(() => {
@@ -669,7 +701,7 @@ export function Analyzer() {
         }
       }
     }
-  }, [offsetOf]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [offsetOf]);
 
   // Swap the focused pair's two slots.
   const swapPair = useCallback(() => {
@@ -697,7 +729,7 @@ export function Analyzer() {
       }
       // Continue where the other preview left off — unless the loop is on,
       // which always restarts at the pair-aligned loop window (the whole
-      // point: identical takes, identical position).
+      // point: identical takes position).
       const otherTime = playingEl && !playingEl.paused ? playingEl.currentTime : null;
       let t = otherTime ?? targetEl.currentTime;
       if (loopOnRef.current) {
@@ -811,7 +843,7 @@ export function Analyzer() {
         startTarget();
       }
     },
-    [volume, fadeOutThenPause, offsetOf], // eslint-disable-line react-hooks/exhaustive-deps
+    [volume, fadeOutThenPause, offsetOf],
   );
 
   useEffect(() => {
@@ -820,17 +852,15 @@ export function Analyzer() {
 
   // Keyboard A/B: the ear-compare workflow is a rapid toggle, and reaching
   // for the button each time breaks the illusion of one continuous take.
-  // The A and B keys jump straight to those slots at the same position.
+  // Each slot's letter key (A–D) jumps straight to it at the same position.
   // Skipped while typing and with modifier chords, which belong to the browser.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      const key = e.key.toLowerCase();
-      if (key !== "a" && key !== "b") return;
-      if (!pairRef.current) return;
-      const target: SlotId = key === "a" ? "a" : "b";
+      const target = SLOT_KEYS.find((id) => id === e.key.toLowerCase());
+      if (!target || !pairRef.current || !analysesRef.current[target]) return;
       if (abPlaying === target) return;
       e.preventDefault();
       abSwitch(target);
@@ -884,51 +914,47 @@ export function Analyzer() {
   const outcomeFor = useCallback(
     (id: SlotId): Outcome => {
       const fid = analysesRef.current[id]?.id;
-      if (!fid || !comparison) return null;
+      if (!fid || !comparison || !focusPair?.includes(fid)) return null;
       if (comparison.winner === "tie") return "tie";
-      if (fid === focusPair?.[0]) return comparison.winner === "a" ? "win" : "lose";
-      if (fid === focusPair?.[1]) return comparison.winner === "b" ? "win" : "lose";
-      return null;
+      if (fid === focusPair[0]) return comparison.winner === "a" ? "win" : "lose";
+      return comparison.winner === "b" ? "win" : "lose";
     },
     [comparison, focusPair],
   );
 
   const outcomeForSlot = useCallback(
     (id: SlotId): Outcome => {
-      if (identical) return pairAnalyses ? "tie" : null;
       return outcomeFor(id);
     },
-    [identical, pairAnalyses, outcomeFor],
+    [outcomeFor],
   );
 
   // Declare the winner everywhere, including the tab title.
   useEffect(() => {
     if (blindHidden) {
       document.title = "Blind test · Spectra";
-    } else if (identical) {
-      document.title = "Identical files · Spectra";
     } else if (!comparison) {
       document.title = "Spectra";
     } else if (comparison.winner === "tie") {
-      document.title = "Toss-up · Spectra";
+      document.title = "No preference · Spectra";
     } else {
       const fid = comparison.winner === "a" ? focusPair?.[0] : focusPair?.[1];
       const slot = fid ? slotOfId[fid] : null;
-      document.title = slot ? `${SLOT_LABELS[slot]} wins · Spectra` : "Winner · Spectra";
+      document.title = slot ? `${SLOT_LABELS[slot]} preferred · Spectra` : "Preference · Spectra";
     }
-  }, [comparison, identical, focusPair, slotOfId, blindHidden]);
+  }, [comparison, focusPair, slotOfId, blindHidden]);
 
   const refineNote = useMemo(() => {
     if (!refinement) return null;
-    const others = Object.entries(refinement.alignByKey).filter(
-      ([fid]) => fid !== refinement.refId,
-    );
-    const minCorr = others.length ? Math.min(...others.map(([, v]) => v.correlation)) : 1;
+    const n = Object.keys(refinement.refined).length;
+    const who =
+      n < readyFiles.length ? `the ${n} copies that match` : n === 2 ? "both" : `all ${n}`;
     return (
-      `Refined: every file re-measured over one shared ${refinement.windowSec.toFixed(1)} s window` +
-      ` (envelope alignment r ≥ ${(minCorr * 100).toFixed(0)}%).`
+      `To compare the same musical material, ${who} were re-measured over ` +
+      `the same ${refinement.windows === 1 ? "passage" : `${refinement.windows} passages`} of the song ` +
+      `(${refinement.measuredSec.toFixed(0)} s measured within ${refinement.overlapSec.toFixed(0)} s of overlap).`
     );
-  }, [refinement]);
+  }, [refinement, readyFiles.length]);
 
   return (
     <div
@@ -941,12 +967,12 @@ export function Analyzer() {
           <div className="max-w-xl">
             <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">Spectra</p>
             <h1 className="mt-2 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
-              Which copy kept the air?
+              Which copy should you keep?
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
-              Compare up to four copies of the same song to find which kept more detail. Encoders
-              write a bitrate in the header. That is a claim. Spectra reads the audio itself — a
-              320 kbps file upconverted from 128 still dies at 16 kHz.
+              Compare two copies of the same recording. Spectra aligns shared passages and shows the
+              measured evidence, or explains when no clear preference is possible. Your audio stays
+              in this browser.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -979,12 +1005,12 @@ export function Analyzer() {
           </p>
         )}
 
-        {refineStatus && (
+        {!blindHidden && refineStatus && (
           <div className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-muted shadow-[var(--shadow-border)]">
-            <p aria-live="polite">Refining the comparison — {refineStatus.phase}</p>
+            <p aria-live="polite">Lining up the copies — {refineStatus.phase}</p>
             <div
               role="progressbar"
-              aria-label="Shared-window refinement progress"
+              aria-label="Shared-passage re-measurement progress"
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={Math.round(refineStatus.amount * 100)}
@@ -997,7 +1023,7 @@ export function Analyzer() {
             </div>
           </div>
         )}
-        {!refineStatus && refineNote && (
+        {!blindHidden && !refineStatus && refineNote && (
           <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-faint shadow-[var(--shadow-border)]">
             {refineNote}
           </p>
@@ -1013,8 +1039,8 @@ export function Analyzer() {
               Judge by ear, then reveal
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
-              Clip 1 and Clip 2 below are hidden copies. Names, numbers, and pictures come back
-              when you reveal — and the verdict will tell you which hidden clip kept the air. Press{" "}
+              Clip 1 and Clip 2 below are hidden copies. Names, numbers, and pictures come back when
+              you reveal — and the verdict will tell you which hidden clip kept the air. Press{" "}
               <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
                 A
               </kbd>
@@ -1037,26 +1063,11 @@ export function Analyzer() {
           </aside>
         )}
 
-        {identical && pairAnalyses && readySlots.length === 2 ? (
-          <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
-            <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
-              <Info className="size-3.5 text-info" />
-              Identical files · no comparison
-            </p>
-            <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
-              Two slots hold the same bytes
-            </h2>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
-              <span className="[overflow-wrap:anywhere]">{pairAnalyses.a.fileName}</span> matched
-              itself bit-for-bit, so there is nothing to declare. Drop a different copy of the song
-              into any slot to compare.
-            </p>
-          </aside>
-        ) : comparison && pairAnalyses && !blindHidden ? (
+        {comparison && pairAnalyses && !blindHidden ? (
           <Verdict
             comparison={comparison}
-            a={pairAnalyses.a}
-            b={pairAnalyses.b}
+            a={pairDisplay!.a}
+            b={pairDisplay!.b}
             slotA={slotOfId[pairAnalyses.a.id] ?? "a"}
             slotB={slotOfId[pairAnalyses.b.id] ?? "b"}
             abPlaying={abPlaying}
@@ -1072,19 +1083,21 @@ export function Analyzer() {
         {blind?.revealed && (
           <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-muted shadow-[var(--shadow-border)]">
             Round revealed —{" "}
-            <span className="text-fg">
-              Clip 1 is {SLOT_LABELS[slotOfId[pairAnalyses?.a.id ?? ""] ?? "a"]}
+            <span className="text-fg [overflow-wrap:anywhere]">
+              Clip 1 was {pairAnalyses?.a.fileName ?? "—"}
             </span>{" "}
             and{" "}
-            <span className="text-fg">
-              Clip 2 is {SLOT_LABELS[slotOfId[pairAnalyses?.b.id ?? ""] ?? "b"]}
+            <span className="text-fg [overflow-wrap:anywhere]">
+              Clip 2 was {pairAnalyses?.b.fileName ?? "—"}
             </span>
             . Names and pictures are unmasked; start a new round to hide them again.
           </p>
         )}
 
         <div className="grid gap-4 lg:grid-cols-2">
-          {SLOT_KEYS.map((id) => {
+          {SLOT_KEYS.filter(
+            (id, index) => index < visibleSlotCount || slots[id].status !== "idle",
+          ).map((id) => {
             const a = analysisOf(slots[id]);
             return (
               <FileSlot
@@ -1093,8 +1106,7 @@ export function Analyzer() {
                 state={slots[id]}
                 outcome={blindHidden ? null : outcomeForSlot(id)}
                 masked={blindHidden}
-                refinedCutoffHz={blindHidden ? null : (a && refinement?.refined[a.id]?.cutoffHz) ?? null}
-                refinedClass={blindHidden ? null : (a && refinement?.refined[a.id]?.qualityClass) ?? null}
+                refined={blindHidden || !a ? null : (refinement?.refined[a.id] ?? null)}
                 loopWindow={loopOn && pairAnalyses ? loopWindowFor(id) : null}
                 scanState={scanStates[id] ?? null}
                 onScan={(seek) => void runScan(id, seek)}
@@ -1108,7 +1120,16 @@ export function Analyzer() {
           })}
         </div>
 
-        {ranking && (
+        {visibleSlotCount < 4 && !blindHidden && (
+          <Button
+            variant="outline"
+            onClick={() => setVisibleSlotCount((count) => Math.min(4, count + 1))}
+          >
+            Add another copy
+          </Button>
+        )}
+
+        {ranking && readyFiles.length > 2 && !blindHidden && (
           <Leaderboard
             ranking={ranking}
             filesById={filesById}
@@ -1124,22 +1145,24 @@ export function Analyzer() {
           />
         )}
 
-        <SpectrumPlot
-          files={displayFiles}
-          winnerSlot={
-            comparison && comparison.winner !== "tie" && focusPair
-              ? (slotOfId[comparison.winner === "a" ? focusPair[0] : focusPair[1]] ?? null)
-              : null
-          }
-        />
+        {!blindHidden && (
+          <SpectrumPlot
+            files={displayFiles}
+            winnerSlot={
+              comparison && comparison.winner !== "tie" && focusPair
+                ? (slotOfId[comparison.winner === "a" ? focusPair[0] : focusPair[1]] ?? null)
+                : null
+            }
+          />
+        )}
 
-        {pairAnalyses && !blindHidden ? (
+        {pairDisplay && !blindHidden ? (
           <CompareTable
-            a={analysisWithRefined(pairAnalyses.a, refinement?.refined[pairAnalyses.a.id])}
-            b={analysisWithRefined(pairAnalyses.b, refinement?.refined[pairAnalyses.b.id])}
+            a={pairDisplay.a}
+            b={pairDisplay.b}
             winner={comparison?.winner ?? "tie"}
-            slotA={slotOfId[pairAnalyses.a.id] ?? "a"}
-            slotB={slotOfId[pairAnalyses.b.id] ?? "b"}
+            slotA={slotOfId[pairDisplay.a.id] ?? "a"}
+            slotB={slotOfId[pairDisplay.b.id] ?? "b"}
           />
         ) : null}
 

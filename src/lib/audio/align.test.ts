@@ -82,7 +82,7 @@ describe("testLag (lag direction: A[i] pairs with B[i - lag])", () => {
 });
 
 describe("alignEnvelopes", () => {
-  it("recovers a 1 s delay through the coarse+fine scan", () => {
+  it("recovers a 1 s delay at block resolution", () => {
     const a = musicish(240); // 30 s
     const k = 8; // 1 s
     // B = 1 s of distinct filler, then A's content from its start: B starts
@@ -144,11 +144,41 @@ describe("songMatchOf", () => {
     assert.ok(m.overlapSec < 12);
   });
 
-  it("rejects >1.6× duration ratios as different even with matching shape", () => {
-    const a = musicish(400); // 50 s
-    const b = blocks(400 / 1.75 | 0, (i) => a.power[i]!); // ~28.6 s copy
+  it("verifies a short excerpt (store preview) as same, never different by length alone", () => {
+    // A: 120 s song. B: a 30 s preview cut from 60 s in — 4× shorter, and
+    // the lag (60 s) is far outside the ±30 s trim search for equal lengths.
+    const a = blocks(960, (i) => {
+      const s = Math.sin(i / 23) * 0.4 + Math.sin(i / 7 + 1.3) * 0.3 + Math.sin(i / 3.1) * 0.2 + 0.9;
+      return s * s;
+    });
+    const start = 480;
+    const b = blocks(240, (i) => a.power[start + i]!);
+    const m = songMatchOf(a, b);
+    assert.equal(m.status, "same");
+    assert.ok(Math.abs(m.lagSec - start * BS) <= BS / 2, `lagSec ${m.lagSec}`);
+    assert.equal(bTimeOf(m.lagSec, 75), 15);
+  });
+
+  it("ignores sliver overlaps: a chance tail-to-head match can't outvote the whole files", () => {
+    // B is unrelated to A except that its last 12 s copy A's first 12 s. The
+    // only perfect match needs a lag leaving 12 s of 50 s overlapping — not
+    // how two copies of one song line up — so the verdict is "different".
+    const a = musicish(400);
+    const tail = 96;
+    const b = blocks(400, (i) => {
+      if (i >= 400 - tail) return a.power[i - (400 - tail)]!;
+      const jitter = (((i * 2654435761) % 97) / 97) * 1.7 + 0.05;
+      return jitter * jitter;
+    });
     const m = songMatchOf(a, b);
     assert.equal(m.status, "different");
+    assert.ok(m.overlapSec >= 0.6 * 50, `overlap ${m.overlapSec}`);
+  });
+
+  it("memoizes per envelope pair", () => {
+    const a = musicish(400);
+    const b = blocks(400, (i) => a.power[i]!);
+    assert.equal(songMatchOf(a, b), songMatchOf(a, b));
   });
 });
 

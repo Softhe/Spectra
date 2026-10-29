@@ -32,7 +32,16 @@ export type SpectrogramData = {
   excerptStartSec: number;
 };
 
+export type ComparisonCoverage = {
+  status: "shared" | "unavailable";
+  key?: string;
+  windows?: number;
+  measuredSec?: number;
+  overlapSec?: number;
+};
+
 export type Analysis = {
+  comparisonCoverage?: ComparisonCoverage;
   id: string;
   fileName: string;
   fileSize: number;
@@ -57,7 +66,7 @@ export type Analysis = {
   sourceLimited: boolean;
   /** True when a very long file was analyzed from excerpts (memory guard). */
   liteAnalysis: boolean;
-  /** Sampled content hash (IndexedDB key). Equal keys = identical bytes. */
+  /** Sampled content hash for caching; equality does not prove full-file identity. */
   cacheKey: string | null;
   /**
    * How the decode rate came to be the one measured. Refinement passes and
@@ -90,6 +99,16 @@ export type Analysis = {
 export type SlotId = "a" | "b" | "c" | "d";
 
 export type Comparison = {
+  outcome: "preferred" | "inconclusive" | "not-comparable";
+  reasons: (
+    | "bandwidth-or-score"
+    | "insufficient-separation"
+    | "identity-uncertain"
+    | "different-recording"
+    | "shared-measurement-unavailable"
+  )[];
+  identityStatus: "same" | "uncertain" | "different" | "unverified";
+  coverage?: ComparisonCoverage;
   winner: SlotId | "tie";
   confidence: "high" | "medium" | "low";
   headline: string;

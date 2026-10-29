@@ -58,26 +58,22 @@ export function Verdict({
   const tone = decided
     ? "bg-bg-elevated shadow-[0_0_0_1.5px_var(--color-win),0_0_60px_-16px_var(--color-win)]"
     : "bg-bg-elevated";
-  const next =
-    abPlaying === slotA ? slotB : abPlaying === slotB ? slotA : slotB;
+  const next = abPlaying === slotA ? slotB : abPlaying === slotB ? slotA : slotB;
 
   return (
     <aside aria-live="polite" className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
       <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
         {decided && <Trophy className="size-3.5 text-win" />}
         {decided
-          ? `Winner · ${SLOT_LABELS[winnerSlot]} · ${comparison.confidence} confidence`
-          : "Toss-up · no winner"}
+          ? `Preferred · ${SLOT_LABELS[winnerSlot]} · ${comparison.confidence} evidence`
+          : comparison.outcome === "not-comparable"
+            ? "Not reliably comparable"
+            : "No quality preference"}
       </p>
       <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
         {comparison.headline}
       </h2>
       <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">{comparison.detail}</p>
-      {(slotA !== "a" || slotB !== "b") && (
-        <p className="mt-2 font-mono text-[11px] text-faint">
-          In this verdict: File A = {SLOT_LABELS[slotA]}, File B = {SLOT_LABELS[slotB]}.
-        </p>
-      )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <Button
           variant="default"
@@ -108,40 +104,70 @@ export function Verdict({
         <span className="text-xs text-faint">
           Same position, matched loudness — or press{" "}
           <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
-            A
+            {slotA.toUpperCase()}
           </kbd>
           /
           <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
-            B
+            {slotB.toUpperCase()}
           </kbd>{" "}
           to switch
         </span>
         <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
-        <CopyReport comparison={comparison} a={a} b={b} />
+        <CopyReport comparison={comparison} a={a} b={b} slotA={slotA} slotB={slotB} />
       </div>
-      <div className="mt-4 grid max-w-3xl gap-3 sm:grid-cols-2">
-        <ScoreBar
-          label={SLOT_LABELS[slotA]}
-          score={a.score}
-          parts={a.scoreParts}
-          cutoffHz={a.cutoffHz}
-          highlighted={comparison.winner === "a"}
-          dimmed={decided && comparison.winner !== "a"}
-        />
-        <ScoreBar
-          label={SLOT_LABELS[slotB]}
-          score={b.score}
-          parts={b.scoreParts}
-          cutoffHz={b.cutoffHz}
-          highlighted={comparison.winner === "b"}
-          dimmed={decided && comparison.winner !== "b"}
-        />
-      </div>
+      <p className="mt-3 text-xs text-muted">
+        Recording match: {comparison.identityStatus}. Evidence: {comparison.confidence}, not a
+        probability.
+        {comparison.coverage?.status === "shared" && (
+          <>
+            {" "}
+            Compared {comparison.coverage.windows} shared passages,{" "}
+            {comparison.coverage.measuredSec?.toFixed(0)} s measured within{" "}
+            {comparison.coverage.overlapSec?.toFixed(0)} s overlap.
+          </>
+        )}
+      </p>
+      <details className="mt-4">
+        <summary className="cursor-pointer text-xs text-muted">Technical score details</summary>
+        <p className="mt-2 text-xs text-muted">
+          Experimental heuristic scores are not percentages of retained fidelity.
+        </p>
+        <div className="mt-3 grid max-w-3xl gap-3 sm:grid-cols-2">
+          <ScoreBar
+            label={SLOT_LABELS[slotA]}
+            score={a.score}
+            parts={a.scoreParts}
+            cutoffHz={a.cutoffHz}
+            highlighted={comparison.winner === "a"}
+            dimmed={decided && comparison.winner !== "a"}
+          />
+          <ScoreBar
+            label={SLOT_LABELS[slotB]}
+            score={b.score}
+            parts={b.scoreParts}
+            cutoffHz={b.cutoffHz}
+            highlighted={comparison.winner === "b"}
+            dimmed={decided && comparison.winner !== "b"}
+          />
+        </div>
+      </details>
     </aside>
   );
 }
 
-function CopyReport({ comparison, a, b }: { comparison: Comparison; a: Analysis; b: Analysis }) {
+function CopyReport({
+  comparison,
+  a,
+  b,
+  slotA,
+  slotB,
+}: {
+  comparison: Comparison;
+  a: Analysis;
+  b: Analysis;
+  slotA: SlotId;
+  slotB: SlotId;
+}) {
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
 
@@ -152,15 +178,18 @@ function CopyReport({ comparison, a, b }: { comparison: Comparison; a: Analysis;
       [
         `File ${slot}: ${x.fileName}`,
         `  container: ${x.container.codec}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${formatSampleRate(x.sampleRate)} ${channelLabel(x.channels)}`,
-        `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, score ${x.score.toFixed(0)}/100`,
+        `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, experimental score ${x.score.toFixed(0)}/100`,
         `  header bitrate: ${x.container.claimedKbps ? `${x.container.claimedKbps} kbps${x.container.vbr ? " VBR" : ""}` : "unknown"}`,
       ].join("\n");
     const text = [
-      `Spectra comparison — ${comparison.headline} (${comparison.confidence} confidence)`,
+      `Spectra comparison — ${comparison.headline} (${comparison.confidence} evidence; recording match: ${comparison.identityStatus})`,
       comparison.detail,
+      comparison.coverage?.status === "shared"
+        ? `Coverage: ${comparison.coverage.windows} windows; ${comparison.coverage.measuredSec?.toFixed(1)} s measured; ${comparison.coverage.overlapSec?.toFixed(1)} s overlap.`
+        : "Shared measurement: unavailable.",
       "",
-      fileLine("A", a),
-      fileLine("B", b),
+      fileLine(slotA.toUpperCase(), a),
+      fileLine(slotB.toUpperCase(), b),
     ].join("\n");
     try {
       await navigator.clipboard.writeText(text);
@@ -309,7 +338,7 @@ export function ScoreBar({
           dimmed && "opacity-60",
         )}
         role="img"
-        aria-label={`${label} quality score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, air ${parts.air.toFixed(0)}, clarity ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
+        aria-label={`${label} experimental score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, air ${parts.air.toFixed(0)}, clarity ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
       >
         {segments.map((s, i) =>
           s.pts > 0.05 ? (
@@ -380,17 +409,17 @@ export function CompareTable({
   slotA: SlotId;
   slotB: SlotId;
 }) {
-  const headA = SLOT_LABELS[slotA] + (slotA !== "a" ? ` · slot ${slotA.toUpperCase()}` : "");
-  const headB = SLOT_LABELS[slotB] + (slotB !== "b" ? ` · slot ${slotB.toUpperCase()}` : "");
+  const headA = SLOT_LABELS[slotA];
+  const headB = SLOT_LABELS[slotB];
   const rows: { label: string; av: string; bv: string; better?: SlotId | "tie" }[] = [
     {
-      label: "Winner",
-      av: winner === "a" ? "Winner" : winner === "tie" ? "Tie" : "Runner-up",
-      bv: winner === "b" ? "Winner" : winner === "tie" ? "Tie" : "Runner-up",
+      label: "Preference",
+      av: winner === "a" ? "Preferred" : winner === "tie" ? "No preference" : "Other copy",
+      bv: winner === "b" ? "Preferred" : winner === "tie" ? "No preference" : "Other copy",
       better: winner,
     },
     {
-      label: "Quality score",
+      label: "Experimental score",
       av: `${a.score.toFixed(0)} / 100`,
       bv: `${b.score.toFixed(0)} / 100`,
       better: Math.abs(a.score - b.score) < 3 ? "tie" : a.score > b.score ? "a" : "b",
@@ -436,7 +465,7 @@ export function CompareTable({
             : "b",
     },
     {
-      label: "Dynamic range (crest)",
+      label: "Crest factor",
       av: `${a.crestDb.toFixed(1)} dB`,
       bv: `${b.crestDb.toFixed(1)} dB`,
       better: Math.abs(a.crestDb - b.crestDb) < 1 ? "tie" : a.crestDb > b.crestDb ? "a" : "b",
@@ -471,10 +500,12 @@ export function CompareTable({
               Metric
             </th>
             <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
-              {headA} {winner === "a" && <Trophy aria-label="Winner" className="inline size-3" />}
+              {headA}{" "}
+              {winner === "a" && <Trophy aria-label="Preferred copy" className="inline size-3" />}
             </th>
             <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
-              {headB} {winner === "b" && <Trophy aria-label="Winner" className="inline size-3" />}
+              {headB}{" "}
+              {winner === "b" && <Trophy aria-label="Preferred copy" className="inline size-3" />}
             </th>
           </tr>
         </thead>
@@ -525,24 +556,24 @@ export function HowTo() {
       </div>
       <ol className="mt-4 grid gap-4 text-sm leading-relaxed text-muted sm:grid-cols-3">
         <li>
-          <p className="font-medium text-fg">Ignore the header</p>
+          <p className="font-medium text-fg">Read metadata separately</p>
           <p className="mt-1">
-            File size and tagged bitrate can lie. A transcode of a 128 kbps MP3 still has a 16 kHz
-            ceiling even if it now says 320.
+            Codec and bitrate describe the file. A lossless container does not prove that the
+            supplied source was lossless.
           </p>
         </li>
         <li>
           <p className="font-medium text-fg">Look for the black band</p>
           <p className="mt-1">
-            Brightness is energy. A hard dark strip at the top of the spectrogram is the encoder's
-            low-pass — that is the real bitrate.
+            Brightness represents energy. A sharp cutoff can reflect filtering or encoding. It
+            cannot establish the original bitrate.
           </p>
         </li>
         <li>
-          <p className="font-medium text-fg">Typical ceilings</p>
+          <p className="font-medium text-fg">Interpret the evidence</p>
           <p className="mt-1">
-            ~16 kHz ≈ 128 kbps · ~19 kHz ≈ 192–256 · 20 kHz+ with a natural fade into noise is
-            lossless or transparent.
+            Bandwidth is one clue. Noise and processing can add high-frequency energy. An
+            inconclusive result does not establish equal fidelity.
           </p>
         </li>
       </ol>

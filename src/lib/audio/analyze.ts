@@ -10,12 +10,7 @@ import {
   type SongMatch,
 } from "./align";
 import { bufferSource, type SliceSource } from "./source";
-import {
-  WavPcmSource,
-  wavContainerInfo,
-  wavMetaFromBlob,
-  type WavPcmMeta,
-} from "./wav-source";
+import { WavPcmSource, wavContainerInfo, wavMetaFromBlob, type WavPcmMeta } from "./wav-source";
 import type {
   Analysis,
   Comparison,
@@ -167,6 +162,16 @@ function sanitizeMonoSlice(mono: Float32Array): void {
   }
 }
 
+function concatFloat32(parts: Float32Array[]): Float32Array {
+  const out = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
 function stereoWidth(buffer: AudioBuffer): number {
   if (buffer.numberOfChannels < 2) return 0;
   const L = buffer.getChannelData(0);
@@ -185,41 +190,48 @@ function stereoWidth(buffer: AudioBuffer): number {
   return Math.min(1, side / (mid + EPS));
 }
 
+/** Non-zero samples a grid verdict needs; fewer reads as "can't tell". */
+const GRID_MIN_SAMPLES = 4096;
+
 /**
  * Effective bit depth: the integer grid the samples actually live on. A 24-bit
  * container whose audio fits the 16-bit grid EXACTLY (zero-padding upconvert,
- * the classic storefront repack) reads 16. deliberately strict: dithered
+ * the classic storefront repack) reads 16. Deliberately strict: dithered
  * masters (residual ~±0.5 LSB) report null rather than a false flag, so this
  * can miss a dithered pad but never flags honest audio.
+ *
+ * Exact zeros sit on every grid and prove nothing, so only non-zero samples
+ * count — digital silence or a near-silent probe returns null instead of a
+ * confident (and false) "16-bit". Every channel must fit: a pad applies to
+ * the whole file, and one honest 24-bit channel disproves it.
  */
-export function bitGridCheck(samples: Float32Array): number | null {
-  const len = samples.length;
-  if (len < 1024) return null;
-  const step = Math.max(1, Math.floor(len / 500_000));
-  let used = 0;
-  for (const bits of [16, 20, 24] as const) {
-    const scale = 2 ** (bits - 1);
-    let worst = 0;
-    let counted = 0;
-    for (let i = 0; i < len; i += step) {
+export function bitGridCheck(channels: Float32Array[]): number | null {
+  const onGrid = (v: number, bits: number) => {
+    const x = v * 2 ** (bits - 1);
+    return Math.abs(x - Math.round(x)) <= 0.03;
+  };
+  // Grids nest (16 ⊂ 20 ⊂ 24), so one sample off a grid rules out every
+  // coarser one too; `fits` is the coarsest grid still standing.
+  const GRIDS = [16, 20, 24];
+  let fits = 0;
+  let nonZero = 0;
+  for (const samples of channels) {
+    const step = Math.max(1, Math.floor(samples.length / 500_000));
+    for (let i = 0; i < samples.length && fits < GRIDS.length; i += step) {
       const v = samples[i]!;
-      counted++;
-      if (!Number.isFinite(v) || (v === 0 && used < 4)) {
-        // Leading all-zero headers: irrelevant either way.
-        continue;
-      }
-      used++;
-      const r = Math.abs(v * scale - Math.round(v * scale));
-      if (r > worst) worst = r;
+      if (v === 0 || !Number.isFinite(v)) continue;
+      nonZero++;
+      while (fits < GRIDS.length && !onGrid(v, GRIDS[fits]!)) fits++;
     }
-    if (used < Math.max(64, counted * 0.01)) return null; // silence
-    if (worst <= 0.03) return bits;
   }
-  return null;
+  if (nonZero < GRID_MIN_SAMPLES) return null;
+  return GRIDS[fits] ?? null;
 }
 
 function effectiveBitDepth(buffer: AudioBuffer): number | null {
-  return bitGridCheck(buffer.getChannelData(0));
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
+  return bitGridCheck(channels);
 }
 
 type Region = { start: number; end: number };
@@ -273,7 +285,10 @@ export function scanRegions(
   const win = windowLength(totalSec, sampleRate);
   if (totalSec < 20) {
     const clamp = (f: number) => Math.max(0, Math.min(Math.floor(f * length), length - win));
-    return { regions: [0.15, 0.5, 0.75].map((f) => ({ start: clamp(f), end: clamp(f) + win })), envelope };
+    return {
+      regions: [0.15, 0.5, 0.75].map((f) => ({ start: clamp(f), end: clamp(f) + win })),
+      envelope,
+    };
   }
   return { regions: longRegions(envelope, length, sampleRate), envelope };
 }
@@ -282,7 +297,10 @@ export function pickRegions(samples: Float32Array, sampleRate: number): Region[]
   return scanRegions(samples, sampleRate).regions;
 }
 
-export function scanRegionsFromBuffer(buffer: AudioBuffer): { regions: Region[]; envelope: Envelope } {
+export function scanRegionsFromBuffer(buffer: AudioBuffer): {
+  regions: Region[];
+  envelope: Envelope;
+} {
   const length = buffer.length;
   const sampleRate = buffer.sampleRate;
   const totalSec = length / sampleRate;
@@ -302,7 +320,10 @@ export function scanRegionsFromBuffer(buffer: AudioBuffer): { regions: Region[];
   const win = windowLength(totalSec, sampleRate);
   if (totalSec < 20) {
     const clamp = (f: number) => Math.max(0, Math.min(Math.floor(f * length), length - win));
-    return { regions: [0.15, 0.5, 0.75].map((f) => ({ start: clamp(f), end: clamp(f) + win })), envelope };
+    return {
+      regions: [0.15, 0.5, 0.75].map((f) => ({ start: clamp(f), end: clamp(f) + win })),
+      envelope,
+    };
   }
   return { regions: longRegions(envelope, length, sampleRate), envelope };
 }
@@ -1127,7 +1148,7 @@ export async function runDsp(
 export async function sliceMono(
   source: SliceSource,
   regions: Region[],
-  excerpt: Region,
+  excerpt?: Region,
   signal?: AbortSignal,
 ): Promise<{ mono: Float32Array; spans: DspSpans }> {
   const parts: Float32Array[] = [];
@@ -1141,16 +1162,16 @@ export async function sliceMono(
     await yieldToMain();
     throwIfAborted(signal);
   }
-  const em = await mixSlice(source, excerpt, signal);
-  const localExcerpt = { start: off, end: off + em.length };
-  parts.push(em);
-  off += em.length;
-  const mono = new Float32Array(off);
-  let p = 0;
-  for (const part of parts) {
-    mono.set(part, p);
-    p += part.length;
+  // No excerpt asked for (measurement-only callers): the spectrogram pass
+  // reuses the first window instead of slicing extra audio.
+  let localExcerpt = localRegions[0] ?? { start: 0, end: 0 };
+  if (excerpt) {
+    const em = await mixSlice(source, excerpt, signal);
+    localExcerpt = { start: off, end: off + em.length };
+    parts.push(em);
+    off += em.length;
   }
+  const mono = concatFloat32(parts);
   sanitizeMonoSlice(mono);
   return { mono, spans: { regions: localRegions, excerpt: localExcerpt } };
 }
@@ -1244,19 +1265,17 @@ export async function scanSourceStats(
         power[b]! += v * v;
         blockTaps[b]++;
       }
-      if (ch >= 2 && strideWidth > 1 ? gi % strideWidth === 0 : ch >= 2) {
+      if (ch >= 2 && gi % strideWidth === 0) {
         // Stereo width tap (strided like stereoWidth()).
-        if (ch >= 2) {
-          const L = channels[0]![i]!;
-          const R = channels[1]![i]!;
-          const m = 0.5 * (L + R);
-          const sd = 0.5 * (L - R);
-          mid += m * m;
-          side += sd * sd;
-        }
+        const L = channels[0]![i]!;
+        const R = channels[1]![i]!;
+        const m = 0.5 * (L + R);
+        const sd = 0.5 * (L - R);
+        mid += m * m;
+        side += sd * sd;
       }
     }
-    onProgress?.((s + CHUNK) / length);
+    onProgress?.(end / length);
     await yieldToMain();
     throwIfAborted(signal);
   }
@@ -1279,7 +1298,7 @@ export async function scanSourceStats(
   return {
     peakDb,
     rmsDb: 20 * Math.log10(rms + EPS),
-    crestDb: peakDb - (20 * Math.log10(rms + EPS)),
+    crestDb: peakDb - 20 * Math.log10(rms + EPS),
     clipFraction: clipRun / Math.max(1, length),
     stereoWidth,
     envelope,
@@ -1311,7 +1330,10 @@ export async function scanExcerpt(
     const span = Math.min(12, wav.frameCount / wav.sampleRate);
     const start = Math.max(
       0,
-      Math.min(Math.floor(startSec * wav.sampleRate), wav.frameCount - Math.floor(span * wav.sampleRate)),
+      Math.min(
+        Math.floor(startSec * wav.sampleRate),
+        wav.frameCount - Math.floor(span * wav.sampleRate),
+      ),
     );
     const end = Math.min(wav.frameCount, start + Math.floor(span * wav.sampleRate));
     const channels = await source.sliceChannels(start, end);
@@ -1351,7 +1373,10 @@ export async function scanExcerpt(
   const durSec = Math.min(12, buffer.duration);
   const start = Math.max(
     0,
-    Math.min(Math.floor(startSec * buffer.sampleRate), buffer.length - Math.floor(durSec * buffer.sampleRate)),
+    Math.min(
+      Math.floor(startSec * buffer.sampleRate),
+      buffer.length - Math.floor(durSec * buffer.sampleRate),
+    ),
   );
   const end = Math.min(buffer.length, start + Math.floor(durSec * buffer.sampleRate));
   if (end - start < 256) throw new Error("That position is past the end of the file.");
@@ -1374,7 +1399,12 @@ export async function scanExcerpt(
     signal,
   );
   onProgress?.("Done", 1);
-  return resampleFramesToDisplay(magDb, buffer.sampleRate, start / buffer.sampleRate, mono.length / buffer.sampleRate);
+  return resampleFramesToDisplay(
+    magDb,
+    buffer.sampleRate,
+    start / buffer.sampleRate,
+    mono.length / buffer.sampleRate,
+  );
 }
 
 /**
@@ -1432,21 +1462,23 @@ async function analyzeStreamingWav(
     { rateConfirmed: true },
   );
 
-  // 16-bit-in-24-bit pad check from cheap slices away from the song's head.
+  // 16-bit-in-24-bit pad check from short probes spread across the song:
+  // one probe can land in a fade or silence, five rarely all do. The probes
+  // are concatenated per channel so the grid verdict sees them as one file.
   let effectiveBits: number | null = null;
-  if (!meta.float) {
+  if (!meta.float && meta.bits > 16) {
     try {
-      const probeSpan = Math.min(60_000, Math.floor(meta.frameCount * 0.5));
-      const probeStart = Math.floor(meta.frameCount * 0.25);
-      const channels = await source.sliceChannels(probeStart, probeStart + probeSpan);
-      effectiveBits = channels[0] ? bitGridCheck(channels[0]!) : null;
-      // When the padding claim matters, also probe the first track region
-      // (a mid-song pad is the common store pattern; head probes catch the rest).
-      if (effectiveBits === null) {
-        const head = await source.sliceChannels(0, Math.min(60_000, meta.frameCount));
-        effectiveBits = head[0] ? bitGridCheck(head[0]!) : null;
+      const probeLen = Math.min(48_000, Math.floor(meta.frameCount / 6));
+      const perChannel: Float32Array[][] = Array.from({ length: meta.channels }, () => []);
+      for (const f of [0.15, 0.3, 0.5, 0.7, 0.85]) {
+        const at = Math.floor(meta.frameCount * f);
+        const probe = await source.sliceChannels(at, at + probeLen);
+        probe.forEach((ch, c) => perChannel[c]?.push(ch));
+        throwIfAborted(signal);
       }
-    } catch {
+      effectiveBits = bitGridCheck(perChannel.map(concatFloat32));
+    } catch (err) {
+      if (err instanceof CancelledError) throw err;
       effectiveBits = null; // best-effort
     }
   }
@@ -1581,7 +1613,14 @@ export async function analyzeFile(
   // (loudest windows + display excerpt) instead and say so in the UI.
   const LONG_SEC = 15 * 60;
   let liteAnalysis = false;
-  let loud: { peakDb: number; rmsDb: number; crestDb: number; clipFraction: number; stereoWidth: number; envelope?: Envelope };
+  let loud: {
+    peakDb: number;
+    rmsDb: number;
+    crestDb: number;
+    clipFraction: number;
+    stereoWidth: number;
+    envelope?: Envelope;
+  };
   let dsp: DspResult;
   if (audio.duration > LONG_SEC) {
     liteAnalysis = true;
@@ -1690,10 +1729,82 @@ export async function analyzeFile(
   return analysis;
 }
 
+/**
+ * Head-to-head verdict. `labels` are the slot letters the reader sees for
+ * `a` and `b` (a C-vs-A pair must say "File C", not "File A"); they only
+ * change the prose, never the decision.
+ */
+/** One result contract for the verdict, ranking, badges and exported report. */
 export function compareAnalyses(
   a: ComparisonMetrics,
   b: ComparisonMetrics,
+  labels: { a: string; b: string } = { a: "A", b: "B" },
 ): Comparison {
+  const measured = compareQualityMeasurements(a, b, labels);
+  const identityStatus = measured.songMatch?.status ?? "unverified";
+  const result: Comparison = {
+    ...measured,
+    identityStatus,
+    outcome: measured.winner === "tie" ? "inconclusive" : "preferred",
+    reasons: [measured.winner === "tie" ? "insufficient-separation" : "bandwidth-or-score"],
+  };
+  if (
+    identityStatus === "different" ||
+    identityStatus === "uncertain" ||
+    identityStatus === "unverified"
+  ) {
+    return {
+      ...result,
+      winner: "tie",
+      confidence: "low",
+      outcome: "not-comparable",
+      reasons: [identityStatus === "different" ? "different-recording" : "identity-uncertain"],
+      headline:
+        identityStatus === "different"
+          ? "These recordings may be different"
+          : "Recording match is uncertain",
+      detail:
+        identityStatus === "different"
+          ? measured.detail
+          : "There is not enough reliable matching audio to recommend a copy. Try longer excerpts of the same recording. You can still listen to both files.",
+    };
+  }
+  const ac = a.comparisonCoverage;
+  const bc = b.comparisonCoverage;
+  if (
+    (ac || bc) &&
+    (ac?.status !== "shared" || bc?.status !== "shared" || !ac.key || ac.key !== bc.key)
+  ) {
+    return {
+      ...result,
+      winner: "tie",
+      confidence: "low",
+      outcome: "inconclusive",
+      reasons: ["shared-measurement-unavailable"],
+      headline: "Shared-passage comparison is unavailable",
+      detail:
+        "The files have not both been measured over the same passages. No quality preference is shown. You can still listen to the aligned copies or reload the files to retry.",
+    };
+  }
+  result.coverage = ac;
+  // Evidence levels describe heuristics, not calibrated probabilities.
+  if (result.winner === "tie") {
+    result.headline = "No clear quality difference detected";
+    result.detail +=
+      " These measurements do not establish equal fidelity or whether a difference is audible.";
+  } else {
+    const slot = result.winner === "a" ? labels.a : labels.b;
+    result.headline = "File " + slot + " likely preserves more of this recording";
+  }
+  return result;
+}
+
+/** Measurement-only calibration seam. Product recommendations must use compareAnalyses. */
+export function compareQualityMeasurements(
+  a: ComparisonMetrics,
+  b: ComparisonMetrics,
+  labels: { a: string; b: string } = { a: "A", b: "B" },
+): Omit<Comparison, "outcome" | "reasons" | "identityStatus"> {
   const cutoffDeltaHz = a.cutoffHz - b.cutoffHz;
   const absDelta = Math.abs(cutoffDeltaHz);
   const scoreDelta = a.score - b.score;
@@ -1736,21 +1847,39 @@ export function compareAnalyses(
 
   const better = winner === "tie" ? a : winner === "a" ? a : b;
   const worse = winner === "tie" ? b : winner === "a" ? b : a;
-  const betterSlot = winner === "b" ? "B" : "A";
-  const worseSlot = winner === "b" ? "A" : "B";
+  const betterSlot = winner === "b" ? labels.b : labels.a;
+  const worseSlot = winner === "b" ? labels.a : labels.b;
 
   const fmtK = (hz: number) =>
     hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.round(hz)} Hz`;
-  const truncName = (name: string) =>
-    name.length > 44 ? `${name.slice(0, 41)}…` : name;
+  const truncName = (name: string) => (name.length > 44 ? `${name.slice(0, 41)}…` : name);
+
+  // 16-bit audio padded into a bigger lossless container: the header's bit
+  // depth is real, the content is not. Only strict grid fits get flagged
+  // (dithered masters read null — see bitGridCheck). Reported for both
+  // sides in every verdict, tie or not: it is a fact about the file.
+  const padNote = (side: ComparisonMetrics, slot: string): string => {
+    const bits = side.container.bitDepth;
+    const eff = side.effectiveBits;
+    if (bits === null || typeof eff !== "number" || bits <= eff) return "";
+    return ` File ${slot} stores ${eff}-bit audio in a ${bits}-bit ${side.container.codec} container — the extra bits carry nothing.`;
+  };
+  const padNotes = () => padNote(a, labels.a) + padNote(b, labels.b);
+
+  // An unverified pairing is said out loud wherever a verdict is given.
+  const identityNote = uncertain
+    ? songMatch!.overlapSec < 12
+      ? " The files share too little audio to confirm they are the same recording."
+      : ` Their loudness contours only partly line up (${Math.round(songMatch!.correlation * 100)}%) — double-check these are the same recording.`
+    : "";
 
   if (different) {
     const detail =
-      `The loudness profiles of the two files line up only weakly ` +
-      `(r=${Math.max(0, (songMatch?.correlation ?? 0) * 100).toFixed(0)}%; two copies of one ` +
-      `recording typically share 90%+). Most likely these are not the same song ` +
-      `(or one is an edit/re-edit so different it misdates the comparison) — ` +
-      `no winner is declared.`;
+      `The loudness contours of the two files don't line up at any offset ` +
+      `(best match ${Math.max(0, songMatch!.correlation * 100).toFixed(0)}%; two copies of one ` +
+      `recording typically match 90%+). These are most likely different songs — or ` +
+      `versions so different (live take, remix) that their quality can't be compared ` +
+      `like for like — so no winner is declared.`;
     return {
       winner: "tie",
       confidence: "low",
@@ -1765,17 +1894,16 @@ export function compareAnalyses(
   if (winner === "tie") {
     const sourceNote =
       a.sourceLimited && b.sourceLimited
-        ? " Both carry little high-frequency content, so this ceiling reflects the music itself — not the encodes."
+        ? " Both are flagged as source-limited by the detector; that is an estimate, not proof of their encoding history."
         : "";
     // When the ceilings visibly differ, say so with both numbers — "both
     // reach about X" is a lie the spectrogram immediately contradicts.
     let detail =
       absDelta >= 500
-        ? `File A reaches ${fmtK(a.cutoffHz)} and File B ${fmtK(b.cutoffHz)}, but the quality scores land together (${a.score.toFixed(0)} vs ${b.score.toFixed(0)}) — so neither copy is clearly better overall. Trust the A/B preview below over either number.${sourceNote}`
-        : `Both reach about ${fmtK(a.cutoffHz)}. If they sound different, it is more likely loudness or stereo width than bandwidth.${sourceNote}`;
-    if (uncertain) {
-      detail += ` Timing similarity is only ${Math.round((songMatch?.correlation ?? 0) * 100)}% — double-check these are the same recording.`;
-    }
+        ? `File ${labels.a} reaches ${fmtK(a.cutoffHz)} and File ${labels.b} ${fmtK(b.cutoffHz)}, but the experimental scores are close (${a.score.toFixed(0)} vs ${b.score.toFixed(0)}) — so these measurements do not support a preference. Trust the A/B preview below over either number.${sourceNote}`
+        : `Both reach about ${fmtK(a.cutoffHz)}. Other differences may remain undetected.${sourceNote}`;
+    detail += padNotes();
+    detail += identityNote;
     return {
       winner,
       confidence,
@@ -1794,7 +1922,7 @@ export function compareAnalyses(
   const airLead = better.cutoffHz - worse.cutoffHz;
   const bandwidth =
     airLead >= 500
-      ? `${fmtK(better.cutoffHz)} of real bandwidth versus ${fmtK(worse.cutoffHz)} — ${fmtK(airLead)} more air kept.`
+      ? `${fmtK(better.cutoffHz)} of estimated bandwidth versus ${fmtK(worse.cutoffHz)} — ${fmtK(airLead)} more measured high-frequency reach.`
       : `File ${betterSlot} reaches ${fmtK(better.cutoffHz)} and File ${worseSlot} ${fmtK(worse.cutoffHz)}, so bandwidth alone doesn't decide this — ` +
         (better.rolloff === "natural" && worse.rolloff !== "natural"
           ? `File ${betterSlot} ends in a clean natural rolloff where File ${worseSlot} hits ${worse.rolloff === "brickwall" ? "a brickwall low-pass" : "a steep rolloff"}, and it scores higher overall (${better.score.toFixed(0)} vs ${worse.score.toFixed(0)}).`
@@ -1802,7 +1930,7 @@ export function compareAnalyses(
 
   const wall =
     worse.rolloff === "brickwall" && !(airLead < 500 && better.rolloff === "natural")
-      ? ` File ${worseSlot} is brickwalled — a hard encoder low-pass, not a quiet mix.`
+      ? ` File ${worseSlot} has a sharp spectral cutoff. Filtering or encoding can cause this; it does not establish source history.`
       : "";
 
   const claimed = worse.container.claimedKbps;
@@ -1818,26 +1946,14 @@ export function compareAnalyses(
         worse.qualityClass !== "high" &&
         worse.qualityClass !== "lossless" &&
         claimed >= 256
-      ? ` The header says ${claimed} kbps, but the spectrum behaves like a much lower-rate encode.`
+      ? ` The header reports ${claimed} kbps, while measured bandwidth is limited; this alone cannot establish an earlier encoding bitrate.`
       : "";
-
-  // 16-bit audio padded into a bigger lossless container: the header's bit
-  // depth is real, the content is not. Only strict grid fits get flagged
-  // (dithered masters read null both sides — see bitGridCheck).
-  const padNote = (side: ComparisonMetrics, slot: string): string => {
-    const bits = side.container.bitDepth;
-    const eff = side.effectiveBits;
-    const lossless = /FLAC|ALAC|WAV|AIFF|CAF|PCM/i.test(side.container.codec) && !/PCM float/i.test(side.container.codec);
-    if (!lossless || bits === null || typeof eff !== "number" || bits <= eff) return "";
-    return ` File ${slot} stores ${eff}-bit audio in a ${bits}-bit ${side.container.codec} container — the label's bigger number carries nothing real.`;
-  };
-  const padding = padNote(worse, worseSlot) + (a.effectiveBits !== b.effectiveBits ? padNote(a, "A") + padNote(b, "B") : "");
 
   // With verified alignment, differing lengths are just trims/different
   // masters — the offset is measured and handled, not a same-song doubt.
   const lengthNote =
     songMatch?.status === "same" && Math.abs(songMatch.lagSec) >= 1
-      ? ` The copies sit ~${Math.abs(songMatch.lagSec).toFixed(1)} s apart in time (trimmed differently); previews align to the same musical position.`
+      ? ` The copies line up ~${Math.abs(songMatch.lagSec).toFixed(1)} s apart (trimmed differently); previews and the comparison follow the same musical position.`
       : sameLength
         ? ""
         : " Lengths differ, so double-check these are the same song.";
@@ -1845,8 +1961,8 @@ export function compareAnalyses(
   return {
     winner,
     confidence,
-    headline: `Winner: File ${betterSlot} — “${truncName(a === better ? a.fileName : b.fileName)}”`,
-    detail: `${bandwidth}${wall}${mismatch}${padding}${lengthNote}`,
+    headline: `Winner: File ${betterSlot} — “${truncName(better.fileName)}”`,
+    detail: `${bandwidth}${wall}${mismatch}${padNotes()}${uncertain ? identityNote : lengthNote}`,
     cutoffDeltaHz,
     sameLength,
     songMatch: songMatch ?? undefined,
@@ -1868,15 +1984,16 @@ export type ComparisonMetrics = Pick<
   | "containerKbps"
   | "envelope"
   | "effectiveBits"
+  | "comparisonCoverage"
 >;
 
 export const QUALITY_LABEL: Record<QualityClass, string> = {
-  lossless: "Lossless class",
-  high: "High · ≈256–320 kbps",
-  medium: "Medium · ≈160–192 kbps",
-  standard: "Standard · ≈128 kbps",
-  low: "Low · ≈64–96 kbps",
-  telephone: "Band-limited · ≪64 kbps",
+  lossless: "Broad bandwidth",
+  high: "Wide bandwidth",
+  medium: "Moderate bandwidth",
+  standard: "Limited bandwidth",
+  low: "Narrow bandwidth",
+  telephone: "Very narrow bandwidth",
 };
 
 export const ROLLOFF_LABEL: Record<RolloffKind, string> = {

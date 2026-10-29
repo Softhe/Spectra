@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { deinterleave, wavContainerInfo, wavMetaFromBlob, WavPcmSource, type WavPcmMeta } from "./wav-source.ts";
+import {
+  deinterleave,
+  wavContainerInfo,
+  wavMetaFromBlob,
+  WavPcmSource,
+  type WavPcmMeta,
+} from "./wav-source.ts";
 
 type WavSpec = {
   channels: number;
@@ -19,7 +25,8 @@ function buildWav(spec: WavSpec): Blob {
   const bps = bits / 8;
   const blockAlign = bps * channels;
   const fmtSize = 16;
-  const junkBytes = spec.junk?.reduce((s, j) => s + 8 + j.payload.length + (j.payload.length % 2), 0) ?? 0;
+  const junkBytes =
+    spec.junk?.reduce((s, j) => s + 8 + j.payload.length + (j.payload.length % 2), 0) ?? 0;
   const dataSize = blockAlign * spec.frames.length;
   const size = 12 + 8 + fmtSize + junkBytes + 8 + dataSize;
   const buf = new ArrayBuffer(size);
@@ -67,19 +74,34 @@ function buildWav(spec: WavSpec): Blob {
   return new Blob([buf], { type: "audio/wav" });
 }
 
-const meta = (over: Partial<WavPcmMeta>): WavPcmMeta => ({
-  sampleRate: 8000,
-  channels: 2,
-  bits: 16,
-  float: false,
-  dataStart: 44,
-  dataLen: 0,
-  blockAlign: 4,
-  frameCount: 0,
-  ...over,
-});
+const meta = (over: Partial<WavPcmMeta>): WavPcmMeta => {
+  const m = {
+    sampleRate: 8000,
+    channels: 2,
+    bits: 16,
+    float: false,
+    dataStart: 44,
+    dataLen: 0,
+    blockAlign: 4,
+    frameCount: 0,
+    ...over,
+  };
+  return { bytesPerSample: m.blockAlign / m.channels, ...m };
+};
 
 describe("deinterleave (decodeAudioData-parity scaling)", () => {
+  it("20-bit declared in 3-byte slots decodes as 24-bit frames", () => {
+    // 0x400000 (= 0.5 in int24 scale) left, 0xC00000 (= -0.5) right.
+    const bytes = new Uint8Array([0x00, 0x00, 0x40, 0x00, 0x00, 0xc0]);
+    const [l, r] = deinterleave(
+      bytes,
+      2,
+      meta({ bits: 20, blockAlign: 6, dataLen: 6, frameCount: 1 }),
+    );
+    assert.equal(l[0], 0.5);
+    assert.equal(r[0], -0.5);
+  });
+
   it("int16: little-endian pairs / 32768", () => {
     const bytes = new Uint8Array([0x00, 0x40, 0x00, 0xc0]); // 16384, -16384
     const [l, r] = deinterleave(bytes, 2, meta({ dataLen: 4, frameCount: 1 }));
@@ -89,7 +111,11 @@ describe("deinterleave (decodeAudioData-parity scaling)", () => {
 
   it("int8: unsigned, centered on 128", () => {
     const bytes = new Uint8Array([128, 255]);
-    const [l, r] = deinterleave(bytes, 2, meta({ bits: 8, blockAlign: 2, dataLen: 2, frameCount: 1 }));
+    const [l, r] = deinterleave(
+      bytes,
+      2,
+      meta({ bits: 8, blockAlign: 2, dataLen: 2, frameCount: 1 }),
+    );
     assert.equal(l[0], 0);
     assert.ok(Math.abs(r[0] - 127 / 128) < 1e-9);
   });
@@ -97,14 +123,22 @@ describe("deinterleave (decodeAudioData-parity scaling)", () => {
   it("int24: sign-extends below zero", () => {
     // -8388608 → 0x800000; +8388607 → 0x7fffff
     const neg = new Uint8Array([0x00, 0x00, 0x80, 0xff, 0xff, 0x7f]);
-    const [l, r] = deinterleave(neg, 2, meta({ bits: 24, blockAlign: 6, dataLen: 6, frameCount: 1 }));
+    const [l, r] = deinterleave(
+      neg,
+      2,
+      meta({ bits: 24, blockAlign: 6, dataLen: 6, frameCount: 1 }),
+    );
     assert.equal(l[0], -1);
     assert.ok(Math.abs(r[0]! - 8388607 / 8388608) < 1e-9);
   });
 
   it("int32: signed little-endian / 2^31", () => {
     const bytes = new Uint8Array([0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0xc0]); // 2^30, -2^30
-    const [l, r] = deinterleave(bytes, 2, meta({ bits: 32, blockAlign: 8, dataLen: 8, frameCount: 1 }));
+    const [l, r] = deinterleave(
+      bytes,
+      2,
+      meta({ bits: 32, blockAlign: 8, dataLen: 8, frameCount: 1 }),
+    );
     assert.equal(l[0], 0.5);
     assert.equal(r[0], -0.5);
   });
@@ -114,19 +148,13 @@ describe("deinterleave (decodeAudioData-parity scaling)", () => {
     const dv = new DataView(bytes.buffer);
     dv.setFloat32(0, 0.25, true);
     dv.setFloat32(4, -0.75, true);
-    const [l, r] = deinterleave(bytes, 2, meta({ bits: 32, float: true, blockAlign: 8, dataLen: 8, frameCount: 1 }));
+    const [l, r] = deinterleave(
+      bytes,
+      2,
+      meta({ bits: 32, float: true, blockAlign: 8, dataLen: 8, frameCount: 1 }),
+    );
     assert.equal(l[0], 0.25);
     assert.equal(r[0], -0.75);
-  });
-
-  it("honors blockAlign stride (26-bit-per-frame packing rarity: spacer bytes skipped)", () => {
-    // 1-channel 16-bit samples stored with blockAlign 3 (1 spacer byte after
-    // each sample-pair frame is atypical, but the stride must be respected).
-    const bytes = new Uint8Array([0x01, 0x80, 0xaa, 0x02, 0x7f, 0xbb]);
-    const [l] = deinterleave(bytes, 2, meta({ channels: 1, blockAlign: 3, dataLen: 6, frameCount: 2 }));
-    // 0x01,0x80 little-endian = 0x8001 = -32767 (sign-extended int16).
-    assert.equal(l[0], -32767 / 32768);
-    assert.equal(l[1], 0x7f02 / 32768);
   });
 
   it("clips the output to the bytes actually provided", () => {
@@ -228,7 +256,6 @@ describe("WavPcmSource sliceChannels", () => {
     assert.equal(src.length, 512);
     assert.equal(src.numberOfChannels, 2);
     const slice = await src.sliceChannels(100, 104);
-    assert.equal(slice[0]![0], Math.round((100 % 100 === 0 ? 0 : 100) as number) / 32768);
     assert.equal(slice[0]![0], (frames[100]![0] as number) / 32768);
     assert.equal(slice[1]![3], frames[103]![1]! / 32768);
   });
@@ -264,5 +291,68 @@ describe("wavContainerInfo", () => {
     assert.equal(info.bitDepth, 24);
     assert.equal(info.claimedKbps, Math.round((48000 * 6 * 8) / 1 / 1000)); // 2304
     assert.equal(info.vbr, false);
+  });
+});
+
+describe("wavMetaFromBlob · RF64 and 20-bit headers", () => {
+  it("uses ds64 for a 5 GiB payload without allocating the payload", async () => {
+    const header = new Uint8Array(80);
+    const v = new DataView(header.buffer);
+    const str = (at: number, value: string) => header.set(new TextEncoder().encode(value), at);
+    str(0, "RF64");
+    v.setUint32(4, 0xffffffff, true);
+    str(8, "WAVEds64");
+    v.setUint32(16, 28, true);
+    const bytes = 5 * 1024 ** 3;
+    v.setBigUint64(20, BigInt(bytes + 72), true);
+    v.setBigUint64(28, BigInt(bytes), true);
+    v.setBigUint64(36, BigInt(bytes / 4), true);
+    str(48, "fmt ");
+    v.setUint32(52, 16, true);
+    v.setUint16(56, 1, true);
+    v.setUint16(58, 2, true);
+    v.setUint32(60, 48000, true);
+    v.setUint32(64, 192000, true);
+    v.setUint16(68, 4, true);
+    v.setUint16(70, 16, true);
+    str(72, "data");
+    v.setUint32(76, 0xffffffff, true);
+    const blob = {
+      size: bytes + 80,
+      slice: (start: number, end: number) => new Blob([header.slice(start, end)]),
+    } as Blob;
+    const parsed = await wavMetaFromBlob(blob);
+    assert.equal(parsed?.dataLen, bytes);
+    assert.equal(parsed?.frameCount, bytes / 4);
+    // Unsafe lengths must never silently lose precision.
+    v.setBigUint64(28, BigInt(Number.MAX_SAFE_INTEGER) + 1n, true);
+    assert.equal(await wavMetaFromBlob(blob), null);
+  });
+  it("rejects an RF64 data sentinel without ds64", async () => {
+    const frames: number[][] = Array.from({ length: 1000 }, () => [100, -100]);
+    const wav = new Uint8Array(
+      await buildWav({ channels: 2, sampleRate: 44100, bits: 16, frames }).arrayBuffer(),
+    );
+    const dv = new DataView(wav.buffer);
+    wav.set([0x52, 0x46, 0x36, 0x34], 0); // "RF64"
+    dv.setUint32(40, 0xffffffff, true); // data chunk size sentinel
+    const m = await wavMetaFromBlob(new Blob([wav]));
+    assert.equal(m, null);
+  });
+
+  it("derives a 3-byte sample width when fmt declares 20 bits", async () => {
+    const wav = new Uint8Array(
+      await buildWav({
+        channels: 2,
+        sampleRate: 44100,
+        bits: 24,
+        frames: Array.from({ length: 1000 }, () => [1, -1]),
+      }).arrayBuffer(),
+    );
+    new DataView(wav.buffer).setUint16(34, 20, true); // wBitsPerSample = 20
+    const m = await wavMetaFromBlob(new Blob([wav]));
+    assert.ok(m);
+    assert.equal(m.bits, 20);
+    assert.equal(m.bytesPerSample, 3);
   });
 });

@@ -62,9 +62,12 @@ export function envelopeFromTaps(
 
 /**
  * Pearson correlation of two (mean-removed, non-silence-masked) amplitude
- * envelopes taken at shifted block offsets. Both envelopes must share
- * `blockSec`. Returns the best normalized correlation over `±maxLagSec` and
- * the lag that produced it.
+ * envelopes over every block lag in `±maxLagSec` (both envelopes must share
+ * `blockSec`). Returns the best correlation and the lag that produced it.
+ *
+ * The scan is exhaustive at block resolution: a coarse pre-scan can step
+ * over the narrow correlation peak of percussive material and settle on a
+ * wrong neighbourhood. Envelopes are tiny (8 blocks/s), so this stays cheap.
  */
 export function alignEnvelopes(
   a: Envelope,
@@ -72,28 +75,26 @@ export function alignEnvelopes(
   maxLagSec = 30,
 ): { lagSec: number; correlation: number; overlapSec: number } {
   const bs = a.blockSec;
-  // Coarse scan at 0.5 s steps (4 blocks), then refine ±0.75 s blockwise.
-  const coarseStep = Math.max(1, Math.round(0.5 / bs));
-  const coarseRange = Math.max(1, Math.ceil(maxLagSec / bs));
+  const range = Math.max(1, Math.ceil(maxLagSec / bs));
+  // Any true alignment of two copies keeps most of the shorter one inside
+  // the longer (a trim loses seconds, an excerpt sits wholly inside). Lags
+  // with a sliver of overlap only add noisy correlations that win the max
+  // by chance, so they are not candidates.
+  const minOverlap = Math.max(
+    Math.ceil(10 / bs),
+    Math.floor(0.6 * Math.min(a.power.length, b.power.length)),
+  );
   let bestLag = 0;
-  let best = testLag(a, b, 0).corr;
-  for (let c = -coarseRange; c <= coarseRange; c += coarseStep) {
-    const r = testLag(a, b, c).corr;
+  let best = testLag(a, b, 0, minOverlap).corr;
+  for (let c = -range; c <= range; c++) {
+    if (c === 0) continue;
+    const r = testLag(a, b, c, minOverlap).corr;
     if (r > best) {
       best = r;
       bestLag = c;
     }
   }
-  const fineFrom = bestLag - coarseStep;
-  const fineTo = bestLag + coarseStep;
-  for (let c = fineFrom; c <= fineTo; c++) {
-    const r = testLag(a, b, c).corr;
-    if (r > best) {
-      best = r;
-      bestLag = c;
-    }
-  }
-  const { overlapSec } = testLag(a, b, bestLag);
+  const { overlapSec } = testLag(a, b, bestLag, minOverlap);
   return { lagSec: bestLag * bs, correlation: best, overlapSec };
 }
 
@@ -102,14 +103,15 @@ export function alignEnvelopes(
  * i lines up with B block (i - lagBlocks), so a moment at A-time t sits at
  * B-time t − lagBlocks·blockSec: lag > 0 means B starts EARLIER (B lost
  * lead-in), lag < 0 means B starts later (extra lead-in in front of it).
- * Returns the squared correlation (`corr²`) plus the overlap used.
+ * Returns the squared correlation (`corr²`) plus the overlap used; lags
+ * sharing fewer than `minOverlap` blocks (default 10 s) score −1.
  */
 export function testLag(
   a: Envelope,
   b: Envelope,
   lagBlocks: number,
+  minOverlap = Math.ceil(10 / a.blockSec),
 ): { corr2: number; corr: number; overlapSec: number } {
-  const minOverlap = Math.ceil(10 / a.blockSec); // ≥10 s of shared timeline
   const iStart = Math.max(0, lagBlocks);
   const iEnd = Math.min(a.power.length, b.power.length + lagBlocks);
   const iLen = iEnd - iStart;
@@ -173,27 +175,48 @@ export function bTimeOf(lagSec: number, aTime: number): number {
 
 const SAME_CUTOFF = 0.83;
 const UNCERTAIN_CUTOFF = 0.55;
-/** Longer than this ratio can't be the same full recording (radio edits keep ≤ 0.6). */
-const DURATION_RATIO_MAX = 1.6;
 const MIN_OVERLAP_SEC = 12;
+/** Lag search for similar-length copies (lead-in/out trims). */
+const BASE_LAG_SEC = 30;
 
+const matchCache = new WeakMap<Envelope, WeakMap<Envelope, SongMatch>>();
+
+/**
+ * Same-song verdict for two envelopes. The correlation over the shared
+ * timeline is the evidence; duration alone never decides — a 30 s store
+ * preview or a truncated download is the same recording, and the lag search
+ * widens by the length difference so an excerpt from mid-song still finds
+ * its place. Memoized per envelope pair (verdicts re-render constantly).
+ */
 export function songMatchOf(a: Envelope, b: Envelope): SongMatch {
-  const { lagSec, correlation, overlapSec } = alignEnvelopes(a, b);
-  const ratio = (la: number, lb: number) => Math.max(la, lb) / Math.max(1e-9, Math.min(la, lb));
-  const tooDivergent = ratio(a.power.length, b.power.length) > DURATION_RATIO_MAX;
+  const cached = matchCache.get(a)?.get(b);
+  if (cached) return cached;
+  const durDiffSec = Math.abs(a.power.length - b.power.length) * a.blockSec;
+  const { lagSec, correlation, overlapSec } = alignEnvelopes(
+    a,
+    b,
+    Math.max(BASE_LAG_SEC, durDiffSec + 5),
+  );
   let status: SongMatchStatus;
   if (overlapSec < MIN_OVERLAP_SEC) {
     // Too little shared timeline to verify anything — say so, without
     // claiming two 4-second clips are different songs.
     status = "uncertain";
-  } else if (!tooDivergent && correlation >= SAME_CUTOFF) {
+  } else if (correlation >= SAME_CUTOFF) {
     status = "same";
-  } else if (!tooDivergent && correlation >= UNCERTAIN_CUTOFF) {
+  } else if (correlation >= UNCERTAIN_CUTOFF) {
     status = "uncertain";
   } else {
     status = "different";
   }
-  return { status, lagSec, correlation, overlapSec };
+  const match: SongMatch = { status, lagSec, correlation, overlapSec };
+  let inner = matchCache.get(a);
+  if (!inner) {
+    inner = new WeakMap();
+    matchCache.set(a, inner);
+  }
+  inner.set(b, match);
+  return match;
 }
 
 /** Sample the envelope at a fractional block position (linear between blocks). */

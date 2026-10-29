@@ -12,8 +12,10 @@ import type { ContainerInfo } from "./types";
 export type WavPcmMeta = {
   sampleRate: number;
   channels: number;
-  /** Container bit depth as declared in fmt (payload bits per sample). */
+  /** Bit depth as declared in fmt (wBitsPerSample — may be 20 in 3 bytes). */
   bits: number;
+  /** Bytes each sample occupies in a frame (blockAlign / channels). */
+  bytesPerSample: number;
   /** True for fmt code 3 (IEEE float). */
   float: boolean;
   /** Byte offset of the first audio frame inside the blob. */
@@ -64,36 +66,66 @@ function parseFmt(bytes: Uint8Array): FmtCore | null {
 export async function wavMetaFromBlob(blob: Blob): Promise<WavPcmMeta | null> {
   if (blob.size < 44) return null;
   const head = new Uint8Array(await blob.slice(0, 44).arrayBuffer());
-  if (ascii(head, 0, 4) !== "RIFF" || ascii(head, 8, 4) !== "WAVE") return null;
+  // RF64 stores its true payload length in ds64, not the data sentinel.
+  const riff = ascii(head, 0, 4);
+  if ((riff !== "RIFF" && riff !== "RF64") || ascii(head, 8, 4) !== "WAVE") return null;
   let i = 12;
   let fmt: FmtCore | null = null;
   let blockAlign = 0;
   let dataStart = -1;
   let dataLen = -1;
+  let rf64DataLen: number | null = null;
   // Header-only walk: per chunk, 8 bytes (enough for fmt, which is
   // always ≤ 40 bytes). An absurd number of junk chunks caps out below.
   for (let reads = 0; i + 8 <= blob.size && reads < 2048; reads++) {
     const hb = new Uint8Array(await blob.slice(i, i + 8).arrayBuffer());
+    if (hb.length !== 8) return null;
     const id = ascii(hb, 0, 4);
     const size = new DataView(hb.buffer).getUint32(4, true);
-    if (id === "fmt " && fmt === null) {
-      const fb = new Uint8Array(await blob.slice(i + 8, Math.min(i + 8 + 40, blob.size)).arrayBuffer());
+    if (id === "ds64" && riff === "RF64") {
+      if (size < 28 || i + 8 + size > blob.size) return null;
+      const ds = await blob.slice(i + 8, i + 36).arrayBuffer();
+      if (ds.byteLength !== 28) return null;
+      const dv = new DataView(ds);
+      const length = dv.getBigUint64(8, true);
+      if (length > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      rf64DataLen = Number(length);
+    } else if (id === "fmt " && fmt === null) {
+      const fb = new Uint8Array(
+        await blob.slice(i + 8, Math.min(i + 8 + 40, blob.size)).arrayBuffer(),
+      );
       fmt = parseFmt(fb);
       blockAlign = fb.length >= 16 ? new DataView(fb.buffer, fb.byteOffset).getUint16(12, true) : 0;
     } else if (id === "data") {
       dataStart = i + 8;
-      dataLen = Math.min(size, blob.size - dataStart);
+      if (size === 0xffffffff && (riff !== "RF64" || rf64DataLen === null)) return null;
+      const declared = size === 0xffffffff ? rf64DataLen! : size;
+      dataLen = Math.min(declared, blob.size - dataStart);
+      if (fmt) break; // everything needed is known; skip trailing chunks
     }
+    // Additional sentinel-sized chunks require a ds64 size table; unsupported.
+    if (size === 0xffffffff) return null;
     const next = i + 8 + size + (size % 2); // chunks pad to even offsets
     if (!(next > i)) break; // corrupt size — bail, trust nothing further
     i = next;
   }
   if (!fmt || dataStart < 0 || dataLen < 0) return null;
   // A zero/undersized data chunk is not analyzable audio.
-  if (!blockAlign) blockAlign = (fmt.bits / 8) * fmt.channels;
-  const frameCount = Math.floor(dataLen / Math.max(1, blockAlign));
+  if (!blockAlign) blockAlign = Math.ceil(fmt.bits / 8) * fmt.channels;
+  // Sample width comes from the frame layout, not wBitsPerSample: 20-bit
+  // audio is stored in 3-byte slots, and some writers declare 20 there.
+  const bytesPerSample = blockAlign / fmt.channels;
+  if (
+    !Number.isInteger(bytesPerSample) ||
+    bytesPerSample < Math.ceil(fmt.bits / 8) ||
+    bytesPerSample > 4
+  ) {
+    return null;
+  }
+  if (fmt.float && bytesPerSample !== 4) return null;
+  const frameCount = Math.floor(dataLen / blockAlign);
   if (frameCount < 256) return null;
-  return { ...fmt, dataStart, dataLen, blockAlign, frameCount };
+  return { ...fmt, bytesPerSample, dataStart, dataLen, blockAlign, frameCount };
 }
 
 /** ContainerInfo entry for the streaming path (mirrors sniff's WAV fields). */
@@ -152,10 +184,13 @@ export class WavPcmSource implements SliceSource {
 /** Interleaved PCM bytes → per-channel Float32, decodeAudioData-parity scaling. */
 export function deinterleave(bytes: Uint8Array, nValues: number, meta: WavPcmMeta): Float32Array[] {
   const channels: Float32Array[] = [];
-  const valueCount = Math.min(nValues, Math.floor(bytes.byteLength / (meta.bits / 8)));
-  for (let c = 0; c < meta.channels; c++) channels.push(new Float32Array(Math.ceil(valueCount / meta.channels)));
+  const bps = meta.bytesPerSample;
+  // Whole frames only: a trailing partial frame would skew the channels.
+  const frames = Math.floor(bytes.byteLength / meta.blockAlign);
+  const valueCount = Math.min(nValues, frames * meta.channels);
+  for (let c = 0; c < meta.channels; c++)
+    channels.push(new Float32Array(Math.ceil(valueCount / meta.channels)));
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const bps = meta.bits / 8;
   const bAlign = meta.blockAlign;
   const counts = new Array(channels.length).fill(0) as number[];
   for (let idx = 0; idx < valueCount; idx++) {
