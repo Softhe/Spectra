@@ -213,7 +213,7 @@ export function Analyzer() {
       }
       const idleSlots = SLOT_KEYS.filter((id) => slots[id].status === "idle");
       if (idleSlots.length === 0) {
-        showDropNotice("All four slots are full. clear one to make room.");
+        showDropNotice("All four slots are full. Clear one to make room.");
         return;
       }
       const taken = files.slice(0, idleSlots.length);
@@ -1111,11 +1111,11 @@ export function Analyzer() {
           <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-muted shadow-[var(--shadow-border)]">
             Round revealed.{" "}
             <span className="text-fg [overflow-wrap:anywhere]">
-              Clip 1 was {pairAnalyses?.a.fileName ?? "Not available"}
+              Clip 1 was {pairAnalyses?.a.fileName ?? "not available"}
             </span>{" "}
             and{" "}
             <span className="text-fg [overflow-wrap:anywhere]">
-              Clip 2 was {pairAnalyses?.b.fileName ?? "Not available"}
+              Clip 2 was {pairAnalyses?.b.fileName ?? "not available"}
             </span>
             . Names and pictures are unmasked; start a new round to hide them again.
           </p>

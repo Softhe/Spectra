@@ -95,7 +95,7 @@ export function Verdict({
           className="shadow-[0_0_24px_-6px_var(--color-accent)] hover:shadow-[0_0_32px_-4px_var(--color-accent)]"
           aria-label={
             abPlaying
-              ? `Now previewing the slot at the playhead. switch to the other copy at the same position`
+              ? `Now previewing one copy at the playhead. Switch to the other copy at the same position.`
               : "Preview A and B back to back at matched loudness"
           }
         >

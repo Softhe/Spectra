@@ -931,13 +931,13 @@ export function decodeErrorMessage(fileName: string, codec: string): string {
   if (/^alac$/i.test(codec)) {
     return (
       `Could not decode '${fileName}'. This browser can't decode Apple Lossless (ALAC). ` +
-      `open this page in Safari, or convert the song to FLAC or WAV.`
+      `Open this page in Safari, or convert the song to FLAC or WAV.`
     );
   }
   if (/vorbis|opus/i.test(codec)) {
     return (
       `Could not decode '${fileName}'. Safari can't play ${codec} files. ` +
-      `try this song as MP3, M4A, WAV, or FLAC, or open this page in Chrome or Firefox.`
+      `Try this song as MP3, M4A, WAV, or FLAC, or open this page in Chrome or Firefox.`
     );
   }
   return `Could not decode '${fileName}'. Try MP3, M4A, AAC, WAV, FLAC, or OGG.`;
