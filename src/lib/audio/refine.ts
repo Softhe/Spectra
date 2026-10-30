@@ -1,5 +1,5 @@
 // Fair-comparison refinement. The base analysis judges each file over windows
-// placed at fixed fractions of ITS OWN length — with differently-trimmed
+// placed at fixed fractions of ITS OWN length. with differently-trimmed
 // copies (an extra 6 s lead-in, a radio edit, a 30 s preview) the two files
 // get judged on different musical material, and the bandwidth verdict reflects
 // placement luck. Once every file is analyzed, this pass re-measures the group
@@ -65,8 +65,8 @@ export type Refinement = {
 };
 
 /**
- * Choose the reference with the most confirmed ("same") matches — ties go to
- * the longest copy, whose timeline covers everyone else's — then express
+ * Choose the reference with the most confirmed ("same") matches. ties go to
+ * the longest copy, whose timeline covers everyone else's. then express
  * every file's offset in its time base. With slot A holding the odd song
  * out, the other copies still align with each other instead of all being
  * dropped. Only confirmed matches count: a short excerpt can sit "uncertain"
@@ -215,7 +215,7 @@ export function needsRefinement(analyses: Analysis[], alignment: GroupAlignment)
 /**
  * Shared-window refinement for the files in `alignment` that verified as the same song. One unreadable file is skipped
  * without killing the rest. Returns null when there is nothing to gain or
- * nothing could be refined — callers must withhold a preference when common measurement is unavailable.
+ * nothing could be refined. callers must withhold a preference when common measurement is unavailable.
  */
 export async function refineAnalyses(
   analyses: Analysis[],
@@ -262,7 +262,7 @@ export async function refineAnalyses(
         };
     } catch (err) {
       // A slot cleared mid-run (or one unreadable file) must not take the
-      // group down with it — a cancellation aborts everything, the rest skip.
+      // group down with it. a cancellation aborts everything, the rest skip.
       if (err instanceof CancelledError) throw err;
       throwIfAborted(signal);
     }

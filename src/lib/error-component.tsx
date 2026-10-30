@@ -10,7 +10,7 @@ function errorMessage(error: unknown): string {
 }
 
 // Rendered on the app's own dark tokens so a crash doesn't flash a white
-// page inside an otherwise dark document. error.message stays visible — it
+// page inside an otherwise dark document. error.message stays visible. it
 // is what turns a blank screen into a reportable bug.
 export function AppErrorComponent({ error }: ErrorComponentProps) {
   return (
@@ -19,9 +19,7 @@ export function AppErrorComponent({ error }: ErrorComponentProps) {
         <TriangleAlert className="size-10" strokeWidth={2} />
       </span>
       <h1 className="text-lg font-medium">Something went wrong</h1>
-      <p className="max-w-md text-sm break-words text-muted">
-        {errorMessage(error)}
-      </p>
+      <p className="max-w-md text-sm break-words text-muted">{errorMessage(error)}</p>
     </main>
   );
 }

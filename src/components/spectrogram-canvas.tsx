@@ -124,7 +124,7 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
     const wrap = wrapRef.current;
     if (!wrap) return;
     // Coalesce resize bursts (window drags, orientation changes) to one
-    // repaint per frame — same pattern as SpectrumPlot.
+    // repaint per frame. same pattern as SpectrumPlot.
     let raf = 0;
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
@@ -175,7 +175,7 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
     });
   }
 
-  // Keyboard probes need a percentage position — no rect measurement at
+  // Keyboard probes need a percentage position. no rect measurement at
   // render time. Pointer probes land on the same representation.
   const hoverTop = hover == null ? null : (1 - hover / data.maxHz) * 100;
 
@@ -250,9 +250,7 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
               excerpt
             </span>
           )}
-          <span>
-            {(data.excerptStartSec + data.durationSec).toFixed(1)}s
-          </span>
+          <span>{(data.excerptStartSec + data.durationSec).toFixed(1)}s</span>
         </div>
       </div>
       <div className="relative w-10 shrink-0 sm:w-12">

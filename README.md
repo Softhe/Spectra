@@ -81,3 +81,18 @@ The DSP functions are shared between workers and the main-thread fallback. The r
 ## License
 
 MIT. See LICENSE.
+
+## Complete decoded-audio check
+
+After passage analysis finishes, choose **Check whether the audio is identical** to compare every decoded sample in the two selected WAV or FLAC files. This check is separate from the quality recommendation.
+
+- **Matches exactly** means every decoded floating-point sample matches in this browser, in every channel. It does not mean the files have the same bytes or metadata.
+- **Matches within tolerance** states the numerical bound used. The default absolute bound is 0.0000001 on the normalized audio scale. A native FLAC versus streamed WAV comparison uses the larger of that bound and one quantization step at the FLAC bit depth. Some browser decoders use different integer scaling for FLAC and WAV. No gain adjustment is applied.
+- **Differs** means sample values, rates, channel counts or sample counts differ. It does not select a better copy or establish audibility.
+- **Could not be verified** covers unsupported formats, channel layouts, unknown sample counts, decode errors and resource limits.
+
+The check supports mono/stereo WAV and native FLAC files up to ten minutes long. WAV files are read in 65,536-frame chunks and can be up to 1 GiB. FLAC files must be at most 32 MiB each, with a combined decoded allocation estimate of at most 64 MiB, reduced to 32 MiB on low-memory devices. FLAC bit depths from 16 to 32 are supported. A compressed file that exceeds the estimate is rejected before decoding. Browser decoding itself is not a streaming operation or a hard memory sandbox.
+
+The check preserves sample rate and channel order. It does not resample, align, trim, reorder channels or normalize gain. Different layouts are not compared as equivalent. No file is modified, and no equivalence result is persisted to the analysis cache. Replacing or swapping a file, or starting a blind round, removes the prior result. Cancellation and the two-minute timeout prevent an incomplete check from publishing a result.
+
+A decoded match does not certify the supplied master or its history. The WAV/FLAC case that prompted this feature was reported by the user; automated verification uses generated fixtures, not files from the user's listening library.

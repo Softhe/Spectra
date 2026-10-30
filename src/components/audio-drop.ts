@@ -24,4 +24,4 @@ export function audioFilesFrom(files: FileList | File[] | null | undefined): Fil
 }
 
 export const NOT_AUDIO_NOTICE =
-  "That doesn't look like an audio file — try MP3, M4A, WAV, FLAC, OGG, AIFF or WebM.";
+  "Choose an audio file such as MP3, M4A, WAV, FLAC, OGG, AIFF or WebM.";

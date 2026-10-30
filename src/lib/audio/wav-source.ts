@@ -18,6 +18,7 @@ export type WavPcmMeta = {
   bytesPerSample: number;
   /** True for fmt code 3 (IEEE float). */
   float: boolean;
+  channelMask?: number;
   /** Byte offset of the first audio frame inside the blob. */
   dataStart: number;
   /** Bytes of audio present from dataStart (clamped to the blob). */
@@ -32,7 +33,13 @@ function ascii(bytes: Uint8Array, from: number, len: number): string {
   return out;
 }
 
-type FmtCore = { sampleRate: number; channels: number; bits: number; float: boolean };
+type FmtCore = {
+  sampleRate: number;
+  channels: number;
+  bits: number;
+  float: boolean;
+  channelMask?: number;
+};
 
 function parseFmt(bytes: Uint8Array): FmtCore | null {
   if (bytes.length < 16) return null;
@@ -55,7 +62,13 @@ function parseFmt(bytes: Uint8Array): FmtCore | null {
   // Mixed-in giant chunks: supported widths only. 32-bit int PCM is rare but legal.
   if (!float && ![8, 16, 20, 24, 32].includes(bits)) return null;
   if (float && bits !== 32) return null;
-  return { sampleRate, channels, bits, float };
+  return {
+    sampleRate,
+    channels,
+    bits,
+    float,
+    channelMask: format === 0xfffe && bytes.length >= 40 ? view.getUint32(20, true) : 0,
+  };
 }
 
 /**

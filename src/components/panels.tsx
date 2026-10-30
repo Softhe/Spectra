@@ -13,6 +13,13 @@ import {
 import * as Slider from "@radix-ui/react-slider";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { AudioEquivalence } from "@/components/audio-equivalence";
+import type { EquivalenceResult } from "@/lib/audio/equivalence";
+import {
+  bitrateDescription,
+  coverageDescription,
+  preferenceDescription,
+} from "@/lib/audio/presentation";
 import { SLOT_LABELS } from "@/components/file-slot";
 import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
@@ -30,6 +37,9 @@ export function Verdict({
   comparison,
   a,
   b,
+  fileA,
+  fileB,
+  analysisBusy,
   slotA,
   slotB,
   abPlaying,
@@ -43,6 +53,9 @@ export function Verdict({
   comparison: Comparison;
   a: Analysis;
   b: Analysis;
+  fileA?: File;
+  fileB?: File;
+  analysisBusy: boolean;
   slotA: SlotId;
   slotB: SlotId;
   abPlaying: SlotId | null;
@@ -53,6 +66,7 @@ export function Verdict({
   volume: number;
   onVolumeChange: (v: number) => void;
 }) {
+  const [equivalence, setEquivalence] = useState<EquivalenceResult | null>(null);
   const decided = comparison.winner !== "tie";
   const winnerSlot = comparison.winner === "a" ? slotA : slotB;
   const tone = decided
@@ -81,12 +95,12 @@ export function Verdict({
           className="shadow-[0_0_24px_-6px_var(--color-accent)] hover:shadow-[0_0_32px_-4px_var(--color-accent)]"
           aria-label={
             abPlaying
-              ? `Now previewing the slot at the playhead — switch to the other copy at the same position`
+              ? `Now previewing one copy at the playhead. Switch to the other copy at the same position.`
               : "Preview A and B back to back at matched loudness"
           }
         >
           {abPlaying ? <ArrowRightLeft className="size-4" /> : <Play className="size-4 ml-0.5" />}
-          {abPlaying ? "Switch now" : "A/B compare by ear"}
+          {abPlaying ? "Switch now" : "Listen and switch"}
         </Button>
         <Button
           variant={loopOn ? "default" : "outline"}
@@ -102,7 +116,7 @@ export function Verdict({
           Swap A/B
         </Button>
         <span className="text-xs text-faint">
-          Same position, matched loudness — or press{" "}
+          Aligned position and matched RMS level. Press{" "}
           <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
             {slotA.toUpperCase()}
           </kbd>
@@ -113,20 +127,28 @@ export function Verdict({
           to switch
         </span>
         <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
-        <CopyReport comparison={comparison} a={a} b={b} slotA={slotA} slotB={slotB} />
+        <CopyReport
+          comparison={comparison}
+          a={a}
+          b={b}
+          slotA={slotA}
+          slotB={slotB}
+          equivalence={equivalence}
+        />
       </div>
       <p className="mt-3 text-xs text-muted">
-        Recording match: {comparison.identityStatus}. Evidence: {comparison.confidence}, not a
-        probability.
-        {comparison.coverage?.status === "shared" && (
-          <>
-            {" "}
-            Compared {comparison.coverage.windows} shared passages,{" "}
-            {comparison.coverage.measuredSec?.toFixed(0)} s measured within{" "}
-            {comparison.coverage.overlapSec?.toFixed(0)} s overlap.
-          </>
-        )}
+        Recording match: {comparison.identityStatus}. {preferenceDescription(comparison)}
       </p>
+      <p className="mt-1 text-xs text-muted">{coverageDescription(comparison.coverage)}</p>
+      {(/FLAC|ALAC/.test(a.container.codec) || /FLAC|ALAC/.test(b.container.codec)) && (
+        <p className="mt-2 text-xs text-muted">
+          FLAC and ALAC use lossless compression. A smaller file does not imply lower audio quality.
+          The format alone does not prove the source's history.
+        </p>
+      )}
+      {fileA && fileB && (
+        <AudioEquivalence a={fileA} b={fileB} disabled={analysisBusy} onResult={setEquivalence} />
+      )}
       <details className="mt-4">
         <summary className="cursor-pointer text-xs text-muted">Technical score details</summary>
         <p className="mt-2 text-xs text-muted">
@@ -161,12 +183,14 @@ function CopyReport({
   b,
   slotA,
   slotB,
+  equivalence,
 }: {
   comparison: Comparison;
   a: Analysis;
   b: Analysis;
   slotA: SlotId;
   slotB: SlotId;
+  equivalence: EquivalenceResult | null;
 }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
@@ -179,14 +203,16 @@ function CopyReport({
         `File ${slot}: ${x.fileName}`,
         `  container: ${x.container.codec}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${formatSampleRate(x.sampleRate)} ${channelLabel(x.channels)}`,
         `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, experimental score ${x.score.toFixed(0)}/100`,
-        `  header bitrate: ${x.container.claimedKbps ? `${x.container.claimedKbps} kbps${x.container.vbr ? " VBR" : ""}` : "unknown"}`,
+        `  ${bitrateDescription(x).label}: ${bitrateDescription(x).value}`,
       ].join("\n");
     const text = [
-      `Spectra comparison — ${comparison.headline} (${comparison.confidence} evidence; recording match: ${comparison.identityStatus})`,
+      `Spectra comparison: ${comparison.headline}`,
+      `Recording match: ${comparison.identityStatus}. ${preferenceDescription(comparison)}`,
       comparison.detail,
-      comparison.coverage?.status === "shared"
-        ? `Coverage: ${comparison.coverage.windows} windows; ${comparison.coverage.measuredSec?.toFixed(1)} s measured; ${comparison.coverage.overlapSec?.toFixed(1)} s overlap.`
-        : "Shared measurement: unavailable.",
+      coverageDescription(comparison.coverage),
+      equivalence
+        ? `Complete audio check: ${equivalence.status}. ${equivalence.detail} Frames checked per channel: ${equivalence.framesCompared}.`
+        : "Complete audio check: not run.",
       "",
       fileLine(slotA.toUpperCase(), a),
       fileLine(slotB.toUpperCase(), b),
@@ -292,7 +318,7 @@ export function ScoreBar({
 }) {
   // Segments explain the total: bandwidth ceiling, rolloff shape, high-frequency
   // air, spectral cleanliness. Widths are points of the 0–100 scale.
-  // NOTE: classes must stay full literals — Tailwind cannot see interpolated
+  // NOTE: classes must stay full literals. Tailwind cannot see interpolated
   // opacity suffixes and would purge them.
   const segClass: Record<"win" | "muted", string[]> = {
     win: ["bg-win/90", "bg-win/60", "bg-win/35", "bg-win/20"],
@@ -301,8 +327,8 @@ export function ScoreBar({
   const segments = [
     { key: "ceiling", label: "Bandwidth ceiling", pts: parts.ceiling },
     { key: "rolloff", label: "Rolloff shape", pts: parts.rolloff },
-    { key: "air", label: "High-frequency air", pts: parts.air },
-    { key: "clarity", label: "Spectral cleanliness", pts: parts.clarity },
+    { key: "air", label: "High-frequency energy", pts: parts.air },
+    { key: "clarity", label: "Spectral shape", pts: parts.clarity },
   ] as const;
   const tone = highlighted ? "win" : "muted";
   // scoreOf can cap the total (noise-starved encodes) and docks clipping, so
@@ -338,7 +364,7 @@ export function ScoreBar({
           dimmed && "opacity-60",
         )}
         role="img"
-        aria-label={`${label} experimental score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, air ${parts.air.toFixed(0)}, clarity ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
+        aria-label={`${label} experimental score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, high-frequency energy ${parts.air.toFixed(0)}, spectral shape ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
       >
         {segments.map((s, i) =>
           s.pts > 0.05 ? (
@@ -356,8 +382,8 @@ export function ScoreBar({
           {label} score breakdown
         </summary>
         <p className="mb-2 leading-relaxed">
-          A composite score out of 100 based on bandwidth, rolloff, high-frequency content, and
-          spectral cleanliness. It describes the encoding evidence, not the musical performance.
+          This experimental score combines bandwidth, rolloff, high-frequency energy and clipping
+          measurements. It does not measure listening quality or the percentage of audio preserved.
         </p>
         <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5">
           {segments.map((segment) => (
@@ -377,7 +403,8 @@ export function ScoreBar({
               <dt>
                 Noise cap
                 <span className="block text-faint">
-                  Broadband hiss reads like a starved encode, so the score is held at 35 or below
+                  A noise-like spectrum limits this experimental score to 35. This does not prove
+                  how the file was encoded.
                 </span>
               </dt>
               <dd className="font-mono text-loss">{capPts.toFixed(1)} pts</dd>
@@ -425,20 +452,20 @@ export function CompareTable({
       better: Math.abs(a.score - b.score) < 3 ? "tie" : a.score > b.score ? "a" : "b",
     },
     {
-      label: "Spectral ceiling",
+      label: "Estimated bandwidth",
       av: formatHz(a.cutoffHz),
       bv: formatHz(b.cutoffHz),
       better: Math.abs(a.cutoffHz - b.cutoffHz) < 400 ? "tie" : a.cutoffHz > b.cutoffHz ? "a" : "b",
     },
     {
-      label: "Container bitrate",
+      label: "File-size average, including metadata",
       av: `${Math.round(a.containerKbps)} kbps`,
       bv: `${Math.round(b.containerKbps)} kbps`,
     },
     {
-      label: "Header bitrate",
-      av: a.container.claimedKbps ? `${a.container.claimedKbps} kbps` : "—",
-      bv: b.container.claimedKbps ? `${b.container.claimedKbps} kbps` : "—",
+      label: "Audio data rate",
+      av: `${bitrateDescription(a).label}: ${bitrateDescription(a).value}`,
+      bv: `${bitrateDescription(b).label}: ${bitrateDescription(b).value}`,
     },
     {
       label: "Bit depth",
@@ -542,7 +569,7 @@ export function CompareTable({
 function bitDepthRow(x: Analysis): string {
   const bits = x.container.bitDepth;
   const eff = x.effectiveBits;
-  if (bits == null) return "—";
+  if (bits == null) return "Not available";
   if (typeof eff === "number" && eff < bits) return `${eff}-bit of ${bits}`;
   return `${bits}-bit`;
 }
@@ -563,14 +590,14 @@ export function HowTo() {
           </p>
         </li>
         <li>
-          <p className="font-medium text-fg">Look for the black band</p>
+          <p className="font-medium text-fg">Read the spectrum</p>
           <p className="mt-1">
             Brightness represents energy. A sharp cutoff can reflect filtering or encoding. It
             cannot establish the original bitrate.
           </p>
         </li>
         <li>
-          <p className="font-medium text-fg">Interpret the evidence</p>
+          <p className="font-medium text-fg">Know the limits</p>
           <p className="mt-1">
             Bandwidth is one clue. Noise and processing can add high-frequency energy. An
             inconclusive result does not establish equal fidelity.
