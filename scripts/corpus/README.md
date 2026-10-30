@@ -9,12 +9,12 @@ invariants (exit code 1 on any FAIL or XPASS; see [Known gaps](#known-gaps)).
 
 Composition (93 items in the snapshot):
 
-| Leg | Items | Rate / length | Source |
-| --- | --- | --- | --- |
-| original | `{kind}-ref`, `-mp3-{96,128,192,320,64m}`, `-aac-{64,128,256}`, `-opus-{64,96,128}`, transcodes | 44.1 kHz, 8 s | lamejs + FFmpeg |
-| 48 kHz | `{kind}-48k-ref`, `-48k-aac-{64,128,256}`, `-48k-opus-{64,96,128}`, `-48k-mp3-{128,320}`, `bright-48k-alac` | 48 kHz, 8 s | FFmpeg (MP3 = libmp3lame) |
-| long | `bright-long-ref`, `bright-long-aac-256`, `bright-long-alac` | 44.1 kHz, 40 s | FFmpeg |
-| Lite (opt-in `LITE=1`) | `bright-lite-aac-256` | 44.1 kHz, 16 min | FFmpeg |
+| Leg                    | Items                                                                                                       | Rate / length    | Source                    |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------- | ------------------------- |
+| original               | `{kind}-ref`, `-mp3-{96,128,192,320,64m}`, `-aac-{64,128,256}`, `-opus-{64,96,128}`, transcodes             | 44.1 kHz, 8 s    | lamejs + FFmpeg           |
+| 48 kHz                 | `{kind}-48k-ref`, `-48k-aac-{64,128,256}`, `-48k-opus-{64,96,128}`, `-48k-mp3-{128,320}`, `bright-48k-alac` | 48 kHz, 8 s      | FFmpeg (MP3 = libmp3lame) |
+| long                   | `bright-long-ref`, `bright-long-aac-256`, `bright-long-alac`                                                | 44.1 kHz, 40 s   | FFmpeg                    |
+| Lite (opt-in `LITE=1`) | `bright-lite-aac-256`                                                                                       | 44.1 kHz, 16 min | FFmpeg                    |
 
 `bright-long` has a −30 dB intro (0–6 s), fade-in (6–8 s), full level
 (8–33 s) and a fade-out to silence (33–40 s), so the >20 s loudness-ranked
@@ -79,7 +79,7 @@ never copies.
   energy; test tones are out of scope (the app targets same-song
   comparisons, where both files share the same sparseness anyway).
 - **Decode rate.** `decode.html` decodes with `OfflineAudioContext(2, 128,
-  rate)` like the app's `decodeNative`; a realtime `AudioContext` resamples to
+rate)` like the app's `decodeNative`; a realtime `AudioContext` resamples to
   the device rate, so 48 kHz items would silently be graded at 44.1 kHz.
   `rate` is the item's label (48000 for `-48k` names, else 44100). The
   original Opus items therefore stay decoded at 44.1 kHz (as in the snapshot),
@@ -107,27 +107,61 @@ accepted reason, keyed by check name + item pair, each with the exact wrong
 outcome it records (`classA/classB` for same-class checks) and a one-line
 reason. The scorer then prints:
 
-| Line | Meaning | Exit code |
-| --- | --- | --- |
-| `XFAIL` | listed, failing with the recorded outcome | not counted |
-| `FAIL … (known gap changed …)` | listed, failing with a different outcome | 1 |
-| `XPASS … — remove from KNOWN_GAPS` | listed, now passing | 1 |
-| `FAIL … stale KNOWN_GAPS entry` | entry matches no check (typo / renamed item) | 1 |
+| Line                               | Meaning                                      | Exit code   |
+| ---------------------------------- | -------------------------------------------- | ----------- |
+| `XFAIL`                            | listed, failing with the recorded outcome    | not counted |
+| `FAIL … (known gap changed …)`     | listed, failing with a different outcome     | 1           |
+| `XPASS … — remove from KNOWN_GAPS` | listed, now passing                          | 1           |
+| `FAIL … stale KNOWN_GAPS entry`    | entry matches no check (typo / renamed item) | 1           |
 
 The summary line counts `pass / fail / xfail / xpass / skip`. Current gaps,
 all `same-class-48k` (48 kHz item vs its 44.1 kHz twin) and all the 44.1 kHz
 detector being too generous on some real encodes:
 
-| Pair | Recorded (48k/44.1k) | Reason |
-| --- | --- | --- |
-| `bright-48k-aac-128` ~ `bright-aac-128` | medium/standard | cuts 17.1k vs 16.9k straddle the 17 kHz class line |
-| `bright-48k-aac-256` ~ `bright-aac-256` | high/lossless | 44.1k AAC-256 shows no low-pass → false lossless |
-| `noisy-48k-aac-256` ~ `noisy-aac-256` | high/lossless | same as above |
-| `quiet-48k-aac-64` ~ `quiet-aac-64` | low/high | sparse 44.1k AAC-64 reads full band |
-| `quiet-48k-opus-64` ~ `quiet-opus-64` | low/standard | sparse 44.1k Opus-64 cut reads ~15.9k vs ~12k at 48k |
-| `sweep-48k-aac-128` ~ `sweep-aac-128` | medium/lossless | sparse 44.1k sweep reads full band → false lossless |
-| `sweep-48k-mp3-320` ~ `sweep-mp3-320` | high/lossless | lamejs 44.1k sweep reads lossless vs libmp3lame 48k high |
+| Pair                                    | Recorded (48k/44.1k) | Reason                                                   |
+| --------------------------------------- | -------------------- | -------------------------------------------------------- |
+| `bright-48k-aac-128` ~ `bright-aac-128` | medium/standard      | cuts 17.1k vs 16.9k straddle the 17 kHz class line       |
+| `bright-48k-aac-256` ~ `bright-aac-256` | high/lossless        | 44.1k AAC-256 shows no low-pass → false lossless         |
+| `noisy-48k-aac-256` ~ `noisy-aac-256`   | high/lossless        | same as above                                            |
+| `quiet-48k-aac-64` ~ `quiet-aac-64`     | low/high             | sparse 44.1k AAC-64 reads full band                      |
+| `quiet-48k-opus-64` ~ `quiet-opus-64`   | low/standard         | sparse 44.1k Opus-64 cut reads ~15.9k vs ~12k at 48k     |
+| `sweep-48k-aac-128` ~ `sweep-aac-128`   | medium/lossless      | sparse 44.1k sweep reads full band → false lossless      |
+| `sweep-48k-mp3-320` ~ `sweep-mp3-320`   | high/lossless        | lamejs 44.1k sweep reads lossless vs libmp3lame 48k high |
 
 These are deferred to a separate 44.1 kHz detector recalibration PR. That PR
 should delete each entry as its check turns XPASS; never add an entry to
 silence a new regression without a reason and a recorded outcome.
+
+## Bounded private-playlist checks
+
+Use copies extracted into a dedicated directory named audio-tests, outside the listening library. The runner does not extract ZIPs or generate derivatives. Prepare any controlled encodes as new files in that test directory using explicit no-overwrite options.
+
+Create cases.json in the dataset directory. Paths are relative to that directory and may not escape it, including through symlinks:
+
+```json
+{
+  "cases": [
+    { "a": "copies/source-128.mp3", "b": "copies/source.flac", "expected": "b-parent" },
+    { "a": "copies/one.flac", "b": "copies/equivalent.wav", "expected": "neutral" },
+    { "a": "copies/one.flac", "b": "copies/unrelated.flac", "expected": "different" }
+  ]
+}
+```
+
+Expected values are observational, neutral, different, or b-parent. b-parent permits an inconclusive result and fails on a reversed preference. It does not certify audibility. Only use it for a controlled parent/derivative relationship, not simply because one file is FLAC. Cross-service pairs normally remain observational.
+
+With the local development server running and ffprobe available:
+
+```sh
+node scripts/corpus/playlist-check.mjs ../audio-tests/dataset http://127.0.0.1:8080/ 8 0
+```
+
+The last arguments are pair limit and zero-based offset. Each run is limited to 16 pairs, 64 MiB per compressed input, 512 MiB total input, ten minutes per file, and an estimated 256 MiB of decoded float audio per file. Free-space preflight requires at least 1 GiB or three times the selected input bytes, whichever is greater. These are conservative workload bounds, not a guarantee against operating-system or hardware failures.
+
+The runner uses one fresh browser context at a time and the application's actual decode, worker DSP, alignment, refinement and comparison functions. It binds its fixture server to loopback and accepts a loopback application URL. Shared-passage failures cannot silently fall back to a quality recommendation. A failed case is checkpointed before the run stops. Ctrl+C closes the browser. Completed pairs remain in runs/<timestamp>/results.json, and offset allows a subsequent bounded run to continue.
+
+Private run manifests record full input hashes, metadata and tool versions. Inputs are rehashed after analysis. Never commit those manifests, recordings, tags, filenames or private reports. Console progress uses anonymous pair IDs. The .gitignore excludes audio-tests inside the repository; keeping private data outside the repository is preferred.
+
+The synthetic browser generator now uses a fixed 0x12345678 seed and records generatorVersion 2. Historical manifests generated with Math.random are not byte-reproducible and must not be silently compared as though they used the same inputs. Keep the existing calibration gaps visible until their new deterministic baseline is independently reviewed.
+
+The synthetic scorer uses compareQualityMeasurements to exercise measurement calibration without treating short synthetic signals as verified songs. Product recommendations use compareAnalyses, which also requires recording identity and compatible shared-measurement coverage. Real-playlist checks exercise this complete product path.

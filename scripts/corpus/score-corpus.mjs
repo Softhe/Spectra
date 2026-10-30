@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import {
   classifyQuality,
-  compareAnalyses,
+  compareQualityMeasurements as compareAnalyses,
   detectCutoff,
   excerptRegion,
   loudFrameMask,

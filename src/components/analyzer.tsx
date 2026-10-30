@@ -1,45 +1,39 @@
-import {
-  ArrowLeftRight,
-  AudioLines,
-  Check,
-  Copy,
-  Info,
-  Play,
-  Trophy,
-  Volume1,
-  Volume2,
-  VolumeX,
-} from "lucide-react";
-import * as Slider from "@radix-ui/react-slider";
+import { AudioLines, Eye, EyeOff, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
-import { FileSlot, type Outcome, type SlotState } from "@/components/file-slot";
+import {
+  FileSlot,
+  SLOT_LABELS,
+  type Outcome,
+  type ScanState,
+  type SlotState,
+} from "@/components/file-slot";
+import { CompareTable, HowTo, Verdict, VolumeControl } from "@/components/panels";
+import { Leaderboard } from "@/components/leaderboard";
 import { SpectrumPlot } from "@/components/spectrum-plot";
 import { Button } from "@/components/ui/button";
-import {
-  analyzeFile,
-  CancelledError,
-  compareAnalyses,
-  QUALITY_LABEL,
-  ROLLOFF_LABEL,
-} from "@/lib/audio/analyze";
+import { analyzeFile, CancelledError, compareAnalyses, scanExcerpt } from "@/lib/audio/analyze";
+import { analysisWithRefined, rankedIds } from "@/lib/audio/rank";
+import type { Ranking } from "@/lib/audio/rank";
+import { alignGroup, refineAnalyses } from "@/lib/audio/refine";
+import type { Refinement } from "@/lib/audio/refine";
 import { makeDemoFiles } from "@/lib/audio/demo";
-import {
-  channelLabel,
-  formatBytes,
-  formatDuration,
-  formatHz,
-  formatSampleRate,
-} from "@/lib/audio/format";
-import type { Analysis, Comparison, ScoreParts, SlotId } from "@/lib/audio/types";
-import { cn } from "@/lib/utils";
+import { formatDuration } from "@/lib/audio/format";
+import type { Analysis, Comparison, SlotId, SpectrogramData } from "@/lib/audio/types";
 
-type Slots = { a: SlotState; b: SlotState };
+const SLOT_KEYS: SlotId[] = ["a", "b", "c", "d"];
+const LOOP_SEC = 5;
 
 const idle: SlotState = { status: "idle" };
+const initialSlots: Record<SlotId, SlotState> = {
+  a: idle,
+  b: idle,
+  c: idle,
+  d: idle,
+};
 
-function analysisOf(s: SlotState): Analysis | null {
-  return s.status === "ready" ? s.analysis : null;
+function analysisOf(s: SlotState | undefined): Analysis | null {
+  return s && s.status === "ready" ? s.analysis : null;
 }
 
 /**
@@ -71,15 +65,22 @@ function enqueueAnalysis<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Rough ETA string for a progress in [0,1] after `elapsedSec` of work. */
+function etaLabel(elapsedSec: number, progress: number): string {
+  const remaining = Math.max(1, (elapsedSec / Math.max(0.02, progress)) * (1 - progress));
+  // Round to 5 s steps so the label flickers less than the honest estimate.
+  return formatDuration(Math.ceil(remaining / 5) * 5);
+}
+
 export function Analyzer() {
-  const [slots, setSlots] = useState<Slots>({ a: idle, b: idle });
+  const [slots, setSlots] = useState<Record<SlotId, SlotState>>(initialSlots);
   const [demoBusy, setDemoBusy] = useState(false);
-  const gens = useRef({ a: 0, b: 0 });
-  const urls = useRef({ a: null as string | null, b: null as string | null });
-  const controllers = useRef({
-    a: null as AbortController | null,
-    b: null as AbortController | null,
-  });
+  const [visibleSlotCount, setVisibleSlotCount] = useState(2);
+  const gens = useRef<Partial<Record<SlotId, number>>>({});
+  const urls = useRef<Partial<Record<SlotId, string | null>>>({});
+  const controllers = useRef<Partial<Record<SlotId, AbortController | null>>>({});
+  const scanCtl = useRef<AbortController | null>(null);
+  const scanSlot = useRef<SlotId | null>(null);
   // Transient feedback when a drop matches nothing audio-like.
   const [dropNotice, setDropNotice] = useState<string | null>(null);
   const noticeTimer = useRef(0);
@@ -93,9 +94,10 @@ export function Analyzer() {
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
 
   const release = useCallback((id: SlotId) => {
+    if (scanSlot.current === id) scanCtl.current?.abort();
     // Stop this slot's playback first: revoking a blob URL out from under
-    // a playing element kills seeks and can stall the element. The other
-    // slot keeps playing — loading B must never silence A.
+    // a playing element kills seeks and can stall the element. Other
+    // slots keep playing — loading B must never silence A.
     document.querySelectorAll<HTMLAudioElement>(`audio[data-slot="${id}"]`).forEach((el) => {
       if (!el.paused) el.pause();
     });
@@ -104,9 +106,22 @@ export function Analyzer() {
     urls.current[id] = null;
   }, []);
 
+  // Swap the two slots' contents. Both slots must be free of in-flight work
+  // (only called on ready slots). File identity travels with the analysis —
+  // the A/B session, refinement, and leaderboard are all keyed by analysis
+  // id, so a swap invalidates nothing.
+  const swapSlots = useCallback((x: SlotId, y: SlotId) => {
+    if (scanSlot.current === x || scanSlot.current === y) scanCtl.current?.abort();
+    setSlots((s) => ({ ...s, [x]: s[y]!, [y]: s[x]! }));
+    [urls.current[x], urls.current[y]] = [urls.current[y], urls.current[x]];
+    setOverrides((o) => ({ ...o, [x]: o[y] ?? null, [y]: o[x] ?? null }));
+    setScanStates((st) => ({ ...st, [x]: null, [y]: null }));
+  }, []);
+
   const run = useCallback(
     async (id: SlotId, file: File) => {
-      const gen = ++gens.current[id];
+      const gen = (gens.current[id] ?? 0) + 1;
+      gens.current[id] = gen;
       // A previous in-flight analysis (this slot) must stop computing, not
       // just get discarded on arrival: on serial devices it otherwise holds
       // the queue, and everywhere else it burns a worker for nothing.
@@ -114,6 +129,9 @@ export function Analyzer() {
       const controller = new AbortController();
       controllers.current[id] = controller;
       release(id);
+      setOverrides((o) => ({ ...o, [id]: null }));
+      setScanStates((st) => ({ ...st, [id]: null }));
+      const startedAt = performance.now();
       setSlots((s) => ({
         ...s,
         [id]: { status: "loading", fileName: file.name, progress: 0.02, phase: "Starting" },
@@ -121,29 +139,36 @@ export function Analyzer() {
       try {
         const analysis = await enqueueAnalysis(async () => {
           // A newer file may have arrived while queued on serial devices.
-          if (gens.current[id] !== gen) throw new CancelledError();
+          if ((gens.current[id] ?? 0) !== gen) throw new CancelledError();
           return analyzeFile(
             file,
             (phase, amount) => {
-              if (gens.current[id] !== gen) return;
-              setSlots((s) => ({
-                ...s,
-                [id]: { status: "loading", fileName: file.name, progress: amount, phase },
+              if ((gens.current[id] ?? 0) !== gen) return;
+              const elapsed = (performance.now() - startedAt) / 1000;
+              setSlots((st) => ({
+                ...st,
+                [id]: {
+                  status: "loading",
+                  fileName: file.name,
+                  progress: amount,
+                  phase,
+                  eta: amount > 0.06 && amount < 0.99 ? etaLabel(elapsed, amount) : undefined,
+                },
               }));
             },
             controller.signal,
           );
         });
-        if (gens.current[id] !== gen) {
+        if ((gens.current[id] ?? 0) !== gen) {
           URL.revokeObjectURL(analysis.objectUrl);
           return;
         }
         urls.current[id] = analysis.objectUrl;
-        setSlots((s) => ({ ...s, [id]: { status: "ready", analysis } }));
+        setSlots((st) => ({ ...st, [id]: { status: "ready", analysis } }));
       } catch (err) {
-        if (err instanceof CancelledError || gens.current[id] !== gen) return;
+        if (err instanceof CancelledError || (gens.current[id] ?? 0) !== gen) return;
         const message = err instanceof Error ? err.message : "Could not analyze that file.";
-        setSlots((s) => ({ ...s, [id]: { status: "error", message } }));
+        setSlots((st) => ({ ...st, [id]: { status: "error", message } }));
       }
     },
     [release],
@@ -151,11 +176,13 @@ export function Analyzer() {
 
   const clear = useCallback(
     (id: SlotId) => {
-      gens.current[id]++;
+      gens.current[id] = (gens.current[id] ?? 0) + 1;
       controllers.current[id]?.abort();
       controllers.current[id] = null;
       release(id);
-      setSlots((s) => ({ ...s, [id]: idle }));
+      setSlots((st) => ({ ...st, [id]: idle }));
+      setOverrides((o) => ({ ...o, [id]: null }));
+      setScanStates((st) => ({ ...st, [id]: null }));
     },
     [release],
   );
@@ -174,44 +201,248 @@ export function Analyzer() {
   const onWindowDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
-      // Only drops that missed both slot cards reach here; a card drop
+      // Only drops that missed every slot card reach here; a card drop
       // targets its own slot (FileSlot stops propagation).
       const files = audioFilesFrom(e.dataTransfer.files);
       if (files.length === 0) {
         showDropNotice(NOT_AUDIO_NOTICE);
         return;
       }
-      if (files.length >= 2) {
-        void run("a", files[0]!);
-        void run("b", files[1]!);
+      const idleSlots = SLOT_KEYS.filter((id) => slots[id].status === "idle");
+      if (idleSlots.length === 0) {
+        showDropNotice("All four slots are full — clear one to make room.");
         return;
       }
-      const target: SlotId =
-        slots.a.status === "idle" ? "a" : slots.b.status === "idle" ? "b" : "a";
-      void run(target, files[0]!);
+      const taken = files.slice(0, idleSlots.length);
+      taken.forEach((f, i) => void run(idleSlots[i]!, f));
+      const overflow = files.length - taken.length;
+      if (overflow > 0) {
+        showDropNotice(
+          overflow === 1
+            ? `Loaded ${taken.length} files — 1 more than the free slots.`
+            : `Loaded ${taken.length} files — ${overflow} more than the free slots.`,
+        );
+      }
     },
-    [run, slots.a.status, slots.b.status, showDropNotice],
+    [run, slots, showDropNotice],
   );
 
-  const a = analysisOf(slots.a);
-  const b = analysisOf(slots.b);
-  // Same bytes in both slots: a faux tie helps nobody — say so directly.
-  // Content-hash keys are primary; when neither hash could be computed
-  // (insecure context, no crypto.subtle), name+size is a conservative
-  // fallback so bit-identical drops still get the honest-tie panel.
-  const identical = Boolean(
-    (a?.cacheKey && b?.cacheKey && a.cacheKey === b.cacheKey) ||
-    (a &&
-      b &&
-      !a.cacheKey &&
-      !b.cacheKey &&
-      a.fileName === b.fileName &&
-      a.fileSize === b.fileSize),
+  // ---- ready files -----------------------------------------------------------
+
+  const readySlots = useMemo(() => SLOT_KEYS.filter((id) => slots[id].status === "ready"), [slots]);
+  const readySig = useMemo(
+    () =>
+      readySlots
+        .map((id) => (slots[id] as { analysis: Analysis }).analysis.id)
+        .sort()
+        .join("|"),
+    [readySlots], // eslint-disable-line react-hooks/exhaustive-deps
   );
-  const comparison: Comparison | null = useMemo(
-    () => (a && b && !identical ? compareAnalyses(a, b) : null),
-    [a, b, identical],
+  const readyFiles: Analysis[] = useMemo(
+    () => readySlots.map((id) => (slots[id] as { analysis: Analysis }).analysis),
+    [readySlots, slots],
   );
+
+  // ---- alignment + shared-window refinement (fair comparison) ----------------
+
+  // Envelope-only, so it is instant and drives pair-aligned previews even
+  // when re-measuring is skipped (copies already aligned) or fails.
+  const alignment = useMemo(() => alignGroup(readyFiles), [readySig]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [refinement, setRefinement] = useState<Refinement | null>(null);
+  const [refineStatus, setRefineStatus] = useState<{ phase: string; amount: number } | null>(null);
+  const refineGen = useRef(0);
+  const refineAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const files = readyFiles;
+    const myGen = ++refineGen.current;
+    refineAbort.current?.abort();
+    setRefinement(null);
+    setRefineStatus(null);
+    if (files.length < 2 || !alignment) return;
+    const controller = new AbortController();
+    refineAbort.current = controller;
+    // Re-measuring decodes every file again: on serial devices it waits its
+    // turn behind (and never alongside) slot analyses.
+    enqueueAnalysis(() => {
+      if (refineGen.current !== myGen) throw new CancelledError();
+      return refineAnalyses(
+        files,
+        alignment,
+        (phase, amount) => {
+          if (controller.signal.aborted || refineGen.current !== myGen) return;
+          setRefineStatus({ phase, amount });
+        },
+        controller.signal,
+      );
+    })
+      .then((res) => {
+        if (controller.signal.aborted || refineGen.current !== myGen) return;
+        setRefineStatus(null);
+        setRefinement(res);
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || refineGen.current !== myGen) return;
+        setRefineStatus(null);
+        if (!(err instanceof CancelledError)) {
+          // Keep alignment/playback; unavailable shared measurements suppress a preference.
+          console.warn("refinement failed", err);
+        }
+      });
+    return () => {
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readySig]);
+
+  // ---- ranking ----------------------------------------------------------------
+
+  const ranking: Ranking | null = useMemo(
+    () => {
+      if (readyFiles.length < 2) return null;
+      // Files the alignment rules out as a different song are listed, not ranked.
+      const outsiders = new Set(
+        Object.entries(alignment?.matchById ?? {})
+          .filter(([, m]) => m.status !== "same")
+          .map(([fid]) => fid),
+      );
+      return rankedIds(readyFiles, refinement?.refined, outsiders, true);
+    },
+    [readySig, refinement, alignment], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const slotOfId = useMemo(() => {
+    const map: Record<string, SlotId | undefined> = {};
+    for (const id of SLOT_KEYS) {
+      const a = analysisOf(slots[id]);
+      if (a) map[a.id] = id;
+    }
+    return map;
+    // `slots`, not readySig: a swap moves files between slots without
+    // changing the set of ready ids, and every label must follow the move.
+  }, [slots]);
+
+  const filesById = useMemo(() => {
+    const map: Record<string, Analysis> = {};
+    for (const id of SLOT_KEYS) {
+      const a = analysisOf(slots[id]);
+      if (a) map[a.id] = analysisWithRefined(a, refinement?.refined[a.id], true);
+    }
+    return map;
+  }, [readySig, refinement]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const displayFiles: (Analysis | null)[] = useMemo(
+    () =>
+      SLOT_KEYS.map((id) => {
+        const a = analysisOf(slots[id]);
+        return a ? analysisWithRefined(a, refinement?.refined[a.id]) : null;
+      }),
+    [readySig, refinement, slots], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // ---- focused pair -------------------------------------------------------------
+
+  const [focusPair, setFocusPair] = useState<[string, string] | null>(null);
+
+  useEffect(() => {
+    setFocusPair((cur) => {
+      const stillThere =
+        cur && cur[0] !== cur[1] && cur.every((fid) => slotOfId[fid] != null) ? cur : null;
+      if (stillThere) return stillThere;
+      if (readySlots.length >= 2) {
+        return [
+          (slots[readySlots[0]!] as { analysis: Analysis }).analysis.id,
+          (slots[readySlots[1]!] as { analysis: Analysis }).analysis.id,
+        ];
+      }
+      return null;
+    });
+  }, [readySig, slotOfId, slots]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pairAnalyses = useMemo(
+    () => {
+      if (!focusPair) return null;
+      const fa = readyFiles.find((f) => f.id === focusPair[0]) ?? null;
+      const fb = readyFiles.find((f) => f.id === focusPair[1]) ?? null;
+      return fa && fb ? { a: fa, b: fb } : null;
+    },
+    [focusPair, readySig], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const pairRef = useRef<{ a: Analysis | null; b: Analysis | null }>({ a: null, b: null });
+  pairRef.current = pairAnalyses ? { a: pairAnalyses.a, b: pairAnalyses.b } : { a: null, b: null };
+  const slotsRef = useRef(slots);
+  slotsRef.current = slots;
+
+  // The focused pair's verdict, refined numbers patched in and written with
+  // the slots' real letters (a C-vs-A pair must not read "File A wins" about
+  // File C). Same rules as the leaderboard's pairwise table, so they agree.
+  const pairDisplay = useMemo(() => {
+    if (!pairAnalyses) return null;
+    return {
+      a: analysisWithRefined(pairAnalyses.a, refinement?.refined[pairAnalyses.a.id], true),
+      b: analysisWithRefined(pairAnalyses.b, refinement?.refined[pairAnalyses.b.id], true),
+    };
+  }, [pairAnalyses, refinement]);
+
+  const comparison: Comparison | null = useMemo(() => {
+    if (!pairDisplay) return null;
+    const la = slotOfId[pairDisplay.a.id];
+    const lb = slotOfId[pairDisplay.b.id];
+    return compareAnalyses(pairDisplay.a, pairDisplay.b, {
+      a: (la ?? "a").toUpperCase(),
+      b: (lb ?? "b").toUpperCase(),
+    });
+  }, [pairDisplay, slotOfId]);
+
+  // ---- blind test -----------------------------------------------------------------
+
+  // Double-blind rounds: the compared files are staged into slots A and B,
+  // which present as anonymous Clip 1 / Clip 2 (identity, numbers, and
+  // pictures hidden) until reveal. In four-slot sessions the round picks two
+  // ready files at random; the displaced files land in the vacated slots.
+  const [blind, setBlind] = useState<{ revealed: boolean } | null>(null);
+  const blindHidden = blind != null && !blind.revealed;
+  const blindHiddenRef = useRef(blindHidden);
+  blindHiddenRef.current = blindHidden;
+  useEffect(() => {
+    // Clear a previous filename from browser/OS media controls before a blind round.
+    if (blindHidden && "mediaSession" in navigator) navigator.mediaSession.metadata = null;
+  }, [blindHidden]);
+
+  const startBlindRound = useCallback(() => {
+    const ready = SLOT_KEYS.filter((id) => slotsRef.current[id].status === "ready");
+    if (ready.length < 2) return;
+    // Fisher–Yates: sort() with a random comparator is biased.
+    const shuffled = [...ready];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+    }
+    const idX = (slotsRef.current[shuffled[0]!] as { analysis: Analysis }).analysis.id;
+    const idY = (slotsRef.current[shuffled[1]!] as { analysis: Analysis }).analysis.id;
+    // Stage the two picks into slots a and b in shuffled order. Positions are
+    // tracked through each swap: moving X into "a" can displace Y (when Y
+    // sat in "a"), so Y's slot is looked up again before the second swap.
+    const where: Record<SlotId, string | null> = { a: null, b: null, c: null, d: null };
+    for (const id of SLOT_KEYS) where[id] = analysisOf(slotsRef.current[id])?.id ?? null;
+    const stage = (fid: string, to: SlotId) => {
+      const from = SLOT_KEYS.find((id) => where[id] === fid)!;
+      if (from === to) return;
+      swapSlots(from, to);
+      [where[from], where[to]] = [where[to], where[from]];
+    };
+    stage(idX, "a");
+    stage(idY, "b");
+    setFocusPair([idX, idY]);
+    setAbPlaying(null);
+    switchPending.current = 0;
+    matchRef.current = {};
+    setBlind({ revealed: false });
+  }, [swapSlots]);
+
+  // ---- A/B session ----------------------------------------------------------------
 
   // A/B compare: which slot the verdict button started (null = manual play).
   const [abPlaying, setAbPlaying] = useState<SlotId | null>(null);
@@ -220,9 +451,8 @@ export function Analyzer() {
   // event (crossfade + seek). Pauses during that window are the switch's own
   // doing and must not end the A/B session.
   const switchPending = useRef(0);
-  const abAnalyses = useRef<{ a: Analysis; b: Analysis } | null>(null);
 
-  // One global volume for both previews (persisted). Fresh sessions start at
+  // One global volume for all previews (persisted). Fresh sessions start at
   // 75% — clearly audible but never ear-splitting. The A/B loudness match
   // lives separately as per-slot ratios, so switching never moves this.
   const [volume, setVolume] = useState<number>(() => {
@@ -235,7 +465,7 @@ export function Analyzer() {
       return 0.75;
     }
   });
-  const matchRef = useRef<{ a: number; b: number }>({ a: 1, b: 1 });
+  const matchRef = useRef<Partial<Record<SlotId, number>>>({});
 
   const applyVolumes = useCallback(() => {
     const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
@@ -253,15 +483,15 @@ export function Analyzer() {
   useEffect(() => {
     setAbPlaying(null);
     switchPending.current = 0;
-    matchRef.current = { a: 1, b: 1 };
-    abAnalyses.current = a && b ? { a, b } : null;
-  }, [a, b]);
+    matchRef.current = {};
+    setLoopOn(false);
+  }, [readySig]);
 
   // Keep every preview element on the global level, including freshly
   // mounted ones after a file loads.
   useEffect(() => {
     applyVolumes();
-  }, [applyVolumes, a, b]);
+  }, [applyVolumes, readySig, volume]);
 
   const handleVolumeChange = useCallback((v: number) => {
     setVolume(v);
@@ -274,14 +504,17 @@ export function Analyzer() {
 
   // Manual slot playback cancels A/B mode (unless this event IS the switch).
   // The same event also feeds lock-screen / headset controls (Media Session).
-  const analysesRef = useRef<{ a: Analysis | null; b: Analysis | null }>({ a: null, b: null });
-  analysesRef.current = { a, b };
+  const analysesRef = useRef<Partial<Record<SlotId, Analysis>>>({});
+  analysesRef.current = Object.fromEntries(
+    SLOT_KEYS.map((id) => [id, analysisOf(slots[id])]).filter(([, a]) => a != null),
+  );
   // Last slot that actually played, A/B or manual. Kept apart from abPlaying,
   // which clears on pause — headset play must resume the copy that paused.
   const lastPlayedRef = useRef<SlotId | null>(null);
   // Latest-switch ref: lets the Media Session handlers (subscribed once)
   // always reach the current abSwitch without re-subscribing.
   const abSwitchRef = useRef<(target: SlotId) => void>(() => undefined);
+
   useEffect(() => {
     const audios = () => [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
     const onPlay = (e: Event) => {
@@ -296,12 +529,14 @@ export function Analyzer() {
       }
       try {
         if ("mediaSession" in navigator) {
-          const track = id === "a" ? analysesRef.current.a : analysesRef.current.b;
+          const track = analysesRef.current[id] ?? null;
           if (track) {
             navigator.mediaSession.metadata = new MediaMetadata({
-              title: track.fileName,
-              artist: `Spectra · File ${id.toUpperCase()}`,
-              album: "Same song, two sources",
+              title: blindHiddenRef.current ? `Clip ${id === "a" ? 1 : 2}` : track.fileName,
+              artist: blindHiddenRef.current
+                ? "Spectra · blind test"
+                : `Spectra · ${SLOT_LABELS[id]}`,
+              album: "Same song, different sources",
             });
           }
         }
@@ -336,7 +571,7 @@ export function Analyzer() {
         ms.setActionHandler("pause", () => {
           for (const el of audios()) el.pause();
         });
-        // Headset prev/next jumps straight between the two copies.
+        // Headset prev/next jumps straight between slots A and B.
         ms.setActionHandler("previoustrack", () => abSwitchRef.current("a"));
         ms.setActionHandler("nexttrack", () => abSwitchRef.current("b"));
       }
@@ -361,18 +596,19 @@ export function Analyzer() {
 
   // Fade bookkeeping so rapid successive switches never strand audio:
   // only the newest fade on an element may pause it.
-  const fadeSeq = useRef({ a: 0, b: 0 });
+  const fadeSeq = useRef<Partial<Record<SlotId, number>>>({});
 
   const fadeOutThenPause = useCallback((el: HTMLAudioElement, id: SlotId, holdVolume: number) => {
-    const seq = ++fadeSeq.current[id];
+    const seq = (fadeSeq.current[id] ?? 0) + 1;
+    fadeSeq.current[id] = seq;
     const ms = 70;
     const t0 = performance.now();
     const finish = () => {
-      if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
+      if ((fadeSeq.current[id] ?? 0) !== seq) return; // superseded by a newer fade
       // Terminal: consume the seq so the backstop timeout below can tell a
       // completed fade from one stalled mid-way (an element that resumed
       // playing afterwards must never be paused by it).
-      fadeSeq.current[id]++;
+      fadeSeq.current[id] = seq + 1;
       el.pause();
       try {
         el.volume = holdVolume;
@@ -381,7 +617,7 @@ export function Analyzer() {
       }
     };
     const step = () => {
-      if (fadeSeq.current[id] !== seq) return; // superseded by a newer fade
+      if ((fadeSeq.current[id] ?? 0) !== seq) return; // superseded by a newer fade
       const k = 1 - Math.min(1, (performance.now() - t0) / ms);
       try {
         el.volume = Math.max(0, holdVolume * k);
@@ -399,7 +635,7 @@ export function Analyzer() {
     // rAF freezes in hidden tabs — without this backstop the old side
     // would keep playing under the new one indefinitely.
     window.setTimeout(() => {
-      if (fadeSeq.current[id] !== seq) return;
+      if ((fadeSeq.current[id] ?? 0) !== seq) return;
       try {
         if (!el.paused) finish();
       } catch {
@@ -412,43 +648,136 @@ export function Analyzer() {
   // disturb the newest one (otherwise two exclusivity pauses silence both).
   const switchSeq = useRef(0);
 
+  // ---- A/B 5-second loop -----------------------------------------------------------
+
+  const [loopOn, setLoopOn] = useState(false);
+  const loopOnRef = useRef(loopOn);
+  loopOnRef.current = loopOn;
+  // Anchor in the focused pair's FIRST member's time base. Pair-aligned
+  // offsets come from the group's envelope alignment (0 for files it could
+  // not place), so a trimmed copy still loops over the identical take.
+  const loopAnchorSec = useRef(30);
+
+  const alignmentRef = useRef(alignment);
+  alignmentRef.current = alignment;
+
+  const offsetOf = useCallback((fid: string | undefined): number => {
+    return fid ? (alignmentRef.current?.offsetById[fid] ?? 0) : 0;
+  }, []);
+
+  /** The pinned loop window for one slot, expressed in that slot's own time. */
+  const loopWindowFor = useCallback(
+    (id: SlotId): { start: number; length: number } | null => {
+      if (!loopOnRef.current || !pairRef.current?.a) return null;
+      const a = analysesRef.current[id];
+      if (!a) return null;
+      const offA = offsetOf(pairRef.current.a.id);
+      const off = offsetOf(a.id);
+      const start = Math.max(
+        0,
+        Math.min(loopAnchorSec.current + (off - offA), Math.max(0, a.durationSec - LOOP_SEC)),
+      );
+      return { start, length: LOOP_SEC };
+    },
+    [offsetOf],
+  );
+
+  const toggleLoop = useCallback(() => {
+    const next = !loopOnRef.current;
+    setLoopOn(next);
+    if (next) {
+      const pair = pairRef.current;
+      if (pair?.a && pair.b) {
+        // Anchor on a playing preview's position; otherwise default 30 s in.
+        const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
+        const playing = els.find((el) => !el.paused);
+        if (playing) {
+          const fid = analysesRef.current[playing.dataset.slot as SlotId]?.id;
+          loopAnchorSec.current = Math.max(
+            0,
+            (playing.currentTime ?? 0) - (offsetOf(fid) - offsetOf(pair.a.id)),
+          );
+        } else {
+          loopAnchorSec.current = Math.max(
+            0,
+            Math.min(30, Math.min(pair.a.durationSec, pair.b.durationSec) - LOOP_SEC - 0.5),
+          );
+        }
+      }
+    }
+  }, [offsetOf]);
+
+  // Swap the focused pair's two slots.
+  const swapPair = useCallback(() => {
+    if (!focusPair || !pairAnalyses) return;
+    const sx = slotOfId[focusPair[0]];
+    const sy = slotOfId[focusPair[1]];
+    if (!sx || !sy) return;
+    swapSlots(sx, sy);
+    // Pair orientation stays (File A stays File A in the verdict text); the
+    // letters under the files simply trade places.
+  }, [focusPair, pairAnalyses, slotOfId, swapSlots]);
+
   const abSwitch = useCallback(
     (target: SlotId) => {
-      const pair = abAnalyses.current;
-      if (!pair) return;
+      const pair = pairRef.current;
+      if (!pair || !pair.a || !pair.b) return;
       const mySwitch = ++switchSeq.current;
       switchPending.current = mySwitch;
       const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
       const targetEl = els.find((el) => el.dataset.slot === target);
-      const otherEl = els.find((el) => el.dataset.slot !== target) ?? null;
+      const playingEl = els.find((el) => el !== targetEl && !el.paused) ?? null;
       if (!targetEl) {
         switchPending.current = 0;
         return;
       }
-      // Continue where the other preview left off. The seek is issued below
-      // (once, after the crossfade starts) so decode stalls stay silent.
-      const otherTime = otherEl && !otherEl.paused ? otherEl.currentTime : null;
-      const t = otherTime ?? targetEl.currentTime;
+      // Continue where the other preview left off — unless the loop is on,
+      // which always restarts at the pair-aligned loop window (the whole
+      // point: identical takes position).
+      const otherTime = playingEl && !playingEl.paused ? playingEl.currentTime : null;
+      let t = otherTime ?? targetEl.currentTime;
+      if (otherTime != null && playingEl?.dataset.slot) {
+        const source = analysesRef.current[playingEl.dataset.slot as SlotId];
+        const destination = analysesRef.current[target];
+        if (source && destination) t += offsetOf(destination.id) - offsetOf(source.id);
+      }
+      if (loopOnRef.current) {
+        const a = analysesRef.current[target];
+        if (a) {
+          const offA = offsetOf(pair.a.id);
+          const off = offsetOf(a.id);
+          t = Math.max(
+            0,
+            Math.min(loopAnchorSec.current + (off - offA), Math.max(0, a.durationSec - LOOP_SEC)),
+          );
+        }
+      }
       // Loudness match on RMS so the switch compares quality, not volume.
       // Stored as ratios against the global volume (which never moves here),
       // so the user's level is retained across switches. The louder side is
       // attenuated to the quieter one, never the reverse.
-      const rmsT = target === "a" ? pair.a.rmsDb : pair.b.rmsDb;
-      const rmsO = target === "a" ? pair.b.rmsDb : pair.a.rmsDb;
+      const otherId = playingEl?.dataset.slot as SlotId | undefined;
+      const targetAnalysis = analysesRef.current[target] ?? null;
+      const otherAnalysis = otherId ? (analysesRef.current[otherId] ?? null) : null;
+      const rmsT = targetAnalysis?.rmsDb ?? pair.a.rmsDb;
+      const rmsO =
+        otherAnalysis?.rmsDb ?? (targetAnalysis?.id === pair.a.id ? pair.b.rmsDb : pair.a.rmsDb);
       const diffDb = rmsO - rmsT;
       const ratio = Math.max(0.05, Math.min(1, Math.pow(10, -Math.abs(diffDb) / 20)));
       const targetIsLouder = diffDb <= 0;
-      const tRatio = targetIsLouder ? ratio : 1;
-      const oRatio = targetIsLouder ? 1 : ratio;
-      matchRef.current = target === "a" ? { a: tRatio, b: oRatio } : { a: oRatio, b: tRatio };
-      const targetVolume = Math.min(1, Math.max(0, volume * tRatio));
-      const otherVolume = Math.min(1, Math.max(0, volume * oRatio));
+      matchRef.current = {
+        ...matchRef.current,
+        [target]: targetIsLouder ? ratio : 1,
+        ...(otherId ? { [otherId]: targetIsLouder ? 1 : ratio } : {}),
+      };
+      const targetVolume = Math.min(1, Math.max(0, volume * (targetIsLouder ? ratio : 1)));
+      const otherVolume = Math.min(1, Math.max(0, volume * (targetIsLouder ? 1 : ratio)));
       // The target may still be fading out from a switch this one supersedes
       // (switching back within the fade, or within the 600 ms backstop while
       // rAF is frozen on a locked screen). Cancel that fade now — its rAF
       // steps and backstop both check fadeSeq — or it would pause the target
       // right after this switch starts or adopts it, ending the session.
-      fadeSeq.current[target]++;
+      fadeSeq.current[target] = (fadeSeq.current[target] ?? 0) + 1;
       targetEl.volume = targetVolume;
 
       const startTarget = () => {
@@ -458,7 +787,7 @@ export function Analyzer() {
           // switch this one supersedes): play() would fire no event, leaving
           // the switch armed/pending forever. Adopt it directly. Its fade was
           // cancelled above; restore the level a partial fade left behind.
-          fadeSeq.current[target]++;
+          fadeSeq.current[target] = (fadeSeq.current[target] ?? 0) + 1;
           try {
             targetEl.volume = targetVolume;
           } catch {
@@ -478,11 +807,12 @@ export function Analyzer() {
         });
       };
 
-      if (otherEl && !otherEl.paused) {
+      if (playingEl && !playingEl.paused) {
         // Crossfade: the old side fades out while the new side seeks (its
         // decode stall happens silently) and starts only once positioned.
-        otherEl.volume = otherVolume;
-        fadeOutThenPause(otherEl, otherEl.dataset.slot === "a" ? "a" : "b", otherVolume);
+        const otherSlot = otherId ?? "b";
+        playingEl.volume = otherVolume;
+        fadeOutThenPause(playingEl, otherSlot, otherVolume);
         const hasDuration = Number.isFinite(targetEl.duration) && targetEl.duration > 0;
         const seekTo = hasDuration
           ? Math.max(0, Math.min(t, Math.max(0, targetEl.duration - 0.1)))
@@ -502,15 +832,28 @@ export function Analyzer() {
           // Never hang on a missing event: bound the wait.
           window.setTimeout(go, 400);
         }
+        // Any further playing previews (3rd/4th slots) stop immediately.
+        for (const el of els) {
+          const sid = el.dataset.slot as SlotId | undefined;
+          if (sid == null || sid === target || el === playingEl) continue;
+          if (!el.paused) el.pause();
+        }
       } else {
-        if (otherEl) {
-          otherEl.volume = otherVolume;
-          otherEl.pause();
+        // Fresh switch: pause everything else and seek/start the target.
+        for (const el of els) {
+          const sid = el.dataset.slot as SlotId | undefined;
+          if (sid == null || sid === target) continue;
+          if (!el.paused) el.volume = otherVolume;
+          el.pause();
+        }
+        const hasDuration = Number.isFinite(targetEl.duration) && targetEl.duration > 0;
+        if (hasDuration && Math.abs(targetEl.currentTime - t) >= 0.05) {
+          targetEl.currentTime = Math.max(0, Math.min(t, Math.max(0, targetEl.duration - 0.1)));
         }
         startTarget();
       }
     },
-    [volume, fadeOutThenPause],
+    [volume, fadeOutThenPause, offsetOf],
   );
 
   useEffect(() => {
@@ -519,48 +862,116 @@ export function Analyzer() {
 
   // Keyboard A/B: the ear-compare workflow is a rapid toggle, and reaching
   // for the button each time breaks the illusion of one continuous take.
-  // The A and B keys jump straight to that copy at the same position.
-  // Skipped while typing (no inputs today, but future-proof) and with
-  // modifier chords, which belong to the browser.
+  // Each slot's letter key (A–D) jumps straight to it at the same position.
+  // Skipped while typing and with modifier chords, which belong to the browser.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      const key = e.key.toLowerCase();
-      if (key !== "a" && key !== "b") return;
-      if (!(a && b)) return;
-      const target: SlotId = key === "a" ? "a" : "b";
+      const target = SLOT_KEYS.find((id) => id === e.key.toLowerCase());
+      if (!target || !pairRef.current || !analysesRef.current[target]) return;
       if (abPlaying === target) return;
       e.preventDefault();
       abSwitch(target);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [a, b, abPlaying, abSwitch]);
+  }, [abPlaying, abSwitch]);
+
+  // ---- excerpt re-scan (pin a scan at the playhead) ---------------------------------
+
+  const [scanStates, setScanStates] = useState<Partial<Record<SlotId, ScanState>>>({});
+  const [overrides, setOverrides] = useState<Partial<Record<SlotId, SpectrogramData | null>>>({});
+  useEffect(() => () => scanCtl.current?.abort(), []);
+
+  const runScan = useCallback(
+    async (id: SlotId, seekSec: number) => {
+      const a = analysesRef.current[id];
+      if (!a || scanCtl.current) return;
+      setScanStates((st) => ({ ...st, [id]: { busy: true, progress: 0.02, phase: "Reading" } }));
+      const controller = new AbortController();
+      scanCtl.current = controller;
+      scanSlot.current = id;
+      try {
+        const res = await fetch(a.objectUrl);
+        if (!res.ok) throw new Error("That file is no longer available to re-scan.");
+        const blob = await res.blob();
+        const data = await enqueueAnalysis(() =>
+          scanExcerpt(
+            blob,
+            a.container.sampleRate,
+            seekSec,
+            (phase, amount) => {
+              if (controller.signal.aborted || analysesRef.current[id]?.id !== a.id) return;
+              setScanStates((st) => ({ ...st, [id]: { busy: true, progress: amount, phase } }));
+            },
+            controller.signal,
+          ),
+        );
+        if (controller.signal.aborted || analysesRef.current[id]?.id !== a.id) return;
+        setOverrides((o) => ({ ...o, [id]: data }));
+        setScanStates((st) => ({ ...st, [id]: null }));
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setScanStates((st) => ({ ...st, [id]: null }));
+        showDropNotice(err instanceof Error ? err.message : "That excerpt could not be scanned.");
+      } finally {
+        if (scanCtl.current === controller) {
+          scanCtl.current = null;
+          scanSlot.current = null;
+        }
+      }
+    },
+    [showDropNotice],
+  );
+
+  // ---- verdict helpers ---------------------------------------------------------------
 
   const outcomeFor = useCallback(
     (id: SlotId): Outcome => {
-      if (identical) return a && b ? "tie" : null;
-      if (!comparison) return null;
+      const fid = analysesRef.current[id]?.id;
+      if (!fid || !comparison || !focusPair?.includes(fid)) return null;
       if (comparison.winner === "tie") return "tie";
-      return comparison.winner === id ? "win" : "lose";
+      if (fid === focusPair[0]) return comparison.winner === "a" ? "win" : "lose";
+      return comparison.winner === "b" ? "win" : "lose";
     },
-    [comparison, identical, a, b],
+    [comparison, focusPair],
+  );
+
+  const outcomeForSlot = useCallback(
+    (id: SlotId): Outcome => {
+      return outcomeFor(id);
+    },
+    [outcomeFor],
   );
 
   // Declare the winner everywhere, including the tab title.
   useEffect(() => {
-    if (identical) {
-      document.title = "Identical files · Spectra";
+    if (blindHidden) {
+      document.title = "Blind test · Spectra";
     } else if (!comparison) {
       document.title = "Spectra";
     } else if (comparison.winner === "tie") {
-      document.title = "Toss-up · Spectra";
+      document.title = "No preference · Spectra";
     } else {
-      document.title = `File ${comparison.winner.toUpperCase()} wins · Spectra`;
+      const fid = comparison.winner === "a" ? focusPair?.[0] : focusPair?.[1];
+      const slot = fid ? slotOfId[fid] : null;
+      document.title = slot ? `${SLOT_LABELS[slot]} preferred · Spectra` : "Preference · Spectra";
     }
-  }, [comparison, identical]);
+  }, [comparison, focusPair, slotOfId, blindHidden]);
+
+  const refineNote = useMemo(() => {
+    if (!refinement) return null;
+    const n = Object.keys(refinement.refined).length;
+    const who =
+      n < readyFiles.length ? `the ${n} copies that match` : n === 2 ? "both" : `all ${n}`;
+    return (
+      `To compare the same musical material, ${who} were re-measured over ` +
+      `the same ${refinement.windows === 1 ? "passage" : `${refinement.windows} passages`} of the song ` +
+      `(${refinement.measuredSec.toFixed(0)} s measured within ${refinement.overlapSec.toFixed(0)} s of overlap).`
+    );
+  }, [refinement, readyFiles.length]);
 
   return (
     <div
@@ -573,19 +984,27 @@ export function Analyzer() {
           <div className="max-w-xl">
             <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">Spectra</p>
             <h1 className="mt-2 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
-              Which copy kept the air?
+              Which copy should you keep?
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
-              Compare two copies of the same song to find which kept more detail. Encoders write a
-              bitrate in the header. That is a claim. Spectra reads the audio itself — a 320 kbps
-              file upconverted from 128 still dies at 16 kHz.
+              Compare two copies of the same recording. Spectra aligns shared passages and shows the
+              measured evidence, or explains when no clear preference is possible. Your audio stays
+              in this browser.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
+              variant={blind ? "default" : "outline"}
+              onClick={() => (blind ? setBlind(null) : startBlindRound())}
+              disabled={readySlots.length < 2}
+            >
+              {blind ? <Eye className="size-4" /> : <EyeOff className="size-4" />}
+              {blind ? "Exit blind test" : "Blind test"}
+            </Button>
+            <Button
               variant="outline"
               onClick={() => void loadDemo()}
-              disabled={demoBusy || slots.a.status === "loading" || slots.b.status === "loading"}
+              disabled={demoBusy || SLOT_KEYS.some((id) => slots[id].status === "loading")}
             >
               <AudioLines className="size-4" />
               {demoBusy ? "Building demo" : "Load a demo comparison"}
@@ -603,523 +1022,180 @@ export function Analyzer() {
           </p>
         )}
 
-        {identical && a && b ? (
+        {!blindHidden && refineStatus && (
+          <div className="rounded-lg bg-bg-elevated px-4 py-2.5 text-sm text-muted shadow-[var(--shadow-border)]">
+            <p aria-live="polite">Lining up the copies — {refineStatus.phase}</p>
+            <div
+              role="progressbar"
+              aria-label="Shared-passage re-measurement progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(refineStatus.amount * 100)}
+              className="mt-2 h-1 overflow-hidden rounded-full bg-bg-subtle"
+            >
+              <div
+                className="h-full bg-accent transition-[width] duration-200"
+                style={{ width: `${Math.round(refineStatus.amount * 100)}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {!blindHidden && !refineStatus && refineNote && (
+          <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-faint shadow-[var(--shadow-border)]">
+            {refineNote}
+          </p>
+        )}
+
+        {blindHidden && (
           <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
             <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
-              <Info className="size-3.5 text-info" />
-              Identical files · no comparison
+              <EyeOff className="size-3.5" />
+              Blind test in progress
             </p>
             <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
-              Both slots hold the same bytes
+              Judge by ear, then reveal
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
-              <span className="[overflow-wrap:anywhere]">{a.fileName}</span> matched itself
-              bit-for-bit, so there is nothing to declare. Drop a different copy of the song into
-              either slot to compare.
+              Clip 1 and Clip 2 below are hidden copies. Names, numbers, and pictures come back when
+              you reveal — and the verdict will tell you which hidden clip kept the air. Press{" "}
+              <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+                A
+              </kbd>
+              /
+              <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+                B
+              </kbd>{" "}
+              to flip between the clips, or turn on the 5-second loop for the toughest passages.
             </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => abSwitch("a")}>
+                Listen to clip 1
+              </Button>
+              <Button variant="outline" onClick={() => abSwitch("b")}>
+                Listen to clip 2
+              </Button>
+              <Button variant="outline" onClick={toggleLoop} aria-pressed={loopOn}>
+                <Repeat className="size-4" />
+                {loopOn ? "5 s loop on" : "5 s loop"}
+              </Button>
+              <VolumeControl volume={volume} onVolumeChange={handleVolumeChange} />
+              <Button onClick={() => setBlind({ revealed: true })}>
+                <Eye className="size-4" />
+                Reveal
+              </Button>
+              <Button variant="outline" onClick={startBlindRound}>
+                <AudioLines className="size-4" />
+                New round
+              </Button>
+            </div>
           </aside>
-        ) : (
-          comparison && (
-            <Verdict
-              comparison={comparison}
-              a={a!}
-              b={b!}
-              abPlaying={abPlaying}
-              onAbSwitch={(target) => abSwitch(target)}
-              volume={volume}
-              onVolumeChange={handleVolumeChange}
-            />
-          )
+        )}
+
+        {comparison && pairAnalyses && !blindHidden ? (
+          <Verdict
+            comparison={comparison}
+            a={pairDisplay!.a}
+            b={pairDisplay!.b}
+            slotA={slotOfId[pairAnalyses.a.id] ?? "a"}
+            slotB={slotOfId[pairAnalyses.b.id] ?? "b"}
+            abPlaying={abPlaying}
+            loopOn={loopOn}
+            onAbSwitch={abSwitch}
+            onToggleLoop={toggleLoop}
+            onSwap={swapPair}
+            volume={volume}
+            onVolumeChange={handleVolumeChange}
+          />
+        ) : null}
+
+        {blind?.revealed && (
+          <p className="rounded-lg bg-bg-elevated px-4 py-2.5 text-xs text-muted shadow-[var(--shadow-border)]">
+            Round revealed —{" "}
+            <span className="text-fg [overflow-wrap:anywhere]">
+              Clip 1 was {pairAnalyses?.a.fileName ?? "—"}
+            </span>{" "}
+            and{" "}
+            <span className="text-fg [overflow-wrap:anywhere]">
+              Clip 2 was {pairAnalyses?.b.fileName ?? "—"}
+            </span>
+            . Names and pictures are unmasked; start a new round to hide them again.
+          </p>
         )}
 
         <div className="grid gap-4 lg:grid-cols-2">
-          <FileSlot
-            id="a"
-            state={slots.a}
-            outcome={outcomeFor("a")}
-            onFile={(f) => void run("a", f)}
-            onClear={() => clear("a")}
-            onRejectedDrop={() => showDropNotice(NOT_AUDIO_NOTICE)}
-          />
-          <FileSlot
-            id="b"
-            state={slots.b}
-            outcome={outcomeFor("b")}
-            onFile={(f) => void run("b", f)}
-            onClear={() => clear("b")}
-            onRejectedDrop={() => showDropNotice(NOT_AUDIO_NOTICE)}
-          />
+          {SLOT_KEYS.filter(
+            (id, index) => index < visibleSlotCount || slots[id].status !== "idle",
+          ).map((id) => {
+            const a = analysisOf(slots[id]);
+            return (
+              <FileSlot
+                key={id}
+                id={id}
+                state={slots[id]}
+                outcome={blindHidden ? null : outcomeForSlot(id)}
+                masked={blindHidden}
+                refined={blindHidden || !a ? null : (refinement?.refined[a.id] ?? null)}
+                loopWindow={loopOn && pairAnalyses ? loopWindowFor(id) : null}
+                scanState={scanStates[id] ?? null}
+                onScan={(seek) => void runScan(id, seek)}
+                override={overrides[id] ?? null}
+                onResetOverride={() => setOverrides((o) => ({ ...o, [id]: null }))}
+                onFile={(f) => void run(id, f)}
+                onClear={() => clear(id)}
+                onRejectedDrop={() => showDropNotice(NOT_AUDIO_NOTICE)}
+              />
+            );
+          })}
         </div>
 
-        <SpectrumPlot a={a} b={b} winnerId={comparison?.winner ?? null} />
+        {visibleSlotCount < 4 && !blindHidden && (
+          <Button
+            variant="outline"
+            onClick={() => setVisibleSlotCount((count) => Math.min(4, count + 1))}
+          >
+            Add another copy
+          </Button>
+        )}
 
-        {a && b && <CompareTable a={a} b={b} winner={comparison?.winner ?? "tie"} />}
+        {ranking && readyFiles.length > 2 && !blindHidden && (
+          <Leaderboard
+            ranking={ranking}
+            filesById={filesById}
+            slotOfId={slotOfId}
+            focusPair={focusPair}
+            refinement={refinement}
+            onPairStart={(idA, idB) => {
+              setFocusPair([idA, idB]);
+              const sa = slotOfId[idA];
+              if (sa) abSwitch(sa);
+            }}
+            onPairFocus={(idA, idB) => setFocusPair([idA, idB])}
+          />
+        )}
+
+        {!blindHidden && (
+          <SpectrumPlot
+            files={displayFiles}
+            winnerSlot={
+              comparison && comparison.winner !== "tie" && focusPair
+                ? (slotOfId[comparison.winner === "a" ? focusPair[0] : focusPair[1]] ?? null)
+                : null
+            }
+          />
+        )}
+
+        {pairDisplay && !blindHidden ? (
+          <CompareTable
+            a={pairDisplay.a}
+            b={pairDisplay.b}
+            winner={comparison?.winner ?? "tie"}
+            slotA={slotOfId[pairDisplay.a.id] ?? "a"}
+            slotB={slotOfId[pairDisplay.b.id] ?? "b"}
+          />
+        ) : null}
 
         <HowTo />
       </div>
     </div>
-  );
-}
-
-function Verdict({
-  comparison,
-  a,
-  b,
-  abPlaying,
-  onAbSwitch,
-  volume,
-  onVolumeChange,
-}: {
-  comparison: Comparison;
-  a: Analysis;
-  b: Analysis;
-  abPlaying: SlotId | null;
-  onAbSwitch: (target: SlotId) => void;
-  volume: number;
-  onVolumeChange: (v: number) => void;
-}) {
-  const decided = comparison.winner !== "tie";
-  const winnerSlot = decided ? comparison.winner.toUpperCase() : null;
-  const tone = decided
-    ? "bg-bg-elevated shadow-[0_0_0_1.5px_var(--color-win),0_0_60px_-16px_var(--color-win)]"
-    : "bg-bg-elevated";
-  const next = abPlaying === "a" ? "b" : "a";
-
-  return (
-    <aside aria-live="polite" className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
-      <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
-        {decided && <Trophy className="size-3.5 text-win" />}
-        {decided
-          ? `Winner · File ${winnerSlot} · ${comparison.confidence} confidence`
-          : "Toss-up · no winner"}
-      </p>
-      <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
-        {comparison.headline}
-      </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">{comparison.detail}</p>
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button
-          variant="default"
-          onClick={() => onAbSwitch(next)}
-          className="shadow-[0_0_24px_-6px_var(--color-accent)] hover:shadow-[0_0_32px_-4px_var(--color-accent)]"
-          aria-label={
-            abPlaying
-              ? `Now previewing File ${abPlaying.toUpperCase()} — switch to File ${next.toUpperCase()} at the same position`
-              : "Preview A and B back to back at matched loudness"
-          }
-        >
-          {abPlaying ? <ArrowLeftRight className="size-4" /> : <Play className="size-4 ml-0.5" />}
-          {abPlaying
-            ? `Previewing ${abPlaying.toUpperCase()} — switch to ${next.toUpperCase()}`
-            : "A/B compare by ear"}
-        </Button>
-        <span className="text-xs text-faint">
-          Same position, matched loudness — or press{" "}
-          <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
-            A
-          </kbd>
-          /
-          <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
-            B
-          </kbd>{" "}
-          to switch
-        </span>
-        <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
-        <CopyReport comparison={comparison} a={a} b={b} />
-      </div>
-      <div className="mt-4 grid max-w-3xl gap-3 sm:grid-cols-2">
-        <ScoreBar
-          label="File A"
-          score={a.score}
-          parts={a.scoreParts}
-          cutoffHz={a.cutoffHz}
-          highlighted={comparison.winner === "a"}
-          dimmed={decided && comparison.winner !== "a"}
-        />
-        <ScoreBar
-          label="File B"
-          score={b.score}
-          parts={b.scoreParts}
-          cutoffHz={b.cutoffHz}
-          highlighted={comparison.winner === "b"}
-          dimmed={decided && comparison.winner !== "b"}
-        />
-      </div>
-    </aside>
-  );
-}
-
-function CopyReport({ comparison, a, b }: { comparison: Comparison; a: Analysis; b: Analysis }) {
-  const [copied, setCopied] = useState(false);
-  const timer = useRef(0);
-
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-
-  async function copy() {
-    const fileLine = (slot: string, x: Analysis) =>
-      [
-        `File ${slot}: ${x.fileName}`,
-        `  container: ${x.container.codec}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${formatSampleRate(x.sampleRate)} ${channelLabel(x.channels)}`,
-        `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, score ${x.score.toFixed(0)}/100`,
-        `  header bitrate: ${x.container.claimedKbps ? `${x.container.claimedKbps} kbps${x.container.vbr ? " VBR" : ""}` : "unknown"}`,
-      ].join("\n");
-    const text = [
-      `Spectra comparison — ${comparison.headline} (${comparison.confidence} confidence)`,
-      comparison.detail,
-      "",
-      fileLine("A", a),
-      fileLine("B", b),
-    ].join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // Clipboard API unavailable (permissions, insecure context): fallback.
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-      } catch {
-        // Give up silently; the button just won't confirm.
-        document.body.removeChild(ta);
-        return;
-      }
-      document.body.removeChild(ta);
-    }
-    setCopied(true);
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 2000);
-  }
-
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={() => void copy()}
-      aria-label="Copy comparison report to clipboard"
-    >
-      {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-      {copied ? "Copied" : "Copy report"}
-    </Button>
-  );
-}
-
-function VolumeControl({
-  volume,
-  onVolumeChange,
-}: {
-  volume: number;
-  onVolumeChange: (v: number) => void;
-}) {
-  const lastAudible = useRef(0.75);
-  useEffect(() => {
-    if (volume > 0) lastAudible.current = volume;
-  }, [volume]);
-
-  const Icon = volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
-
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={() => onVolumeChange(volume === 0 ? lastAudible.current : 0)}
-        className="inline-flex size-9 items-center justify-center rounded-sm text-muted hover:bg-bg-subtle hover:text-fg"
-        aria-label={volume === 0 ? "Unmute previews" : "Mute previews"}
-      >
-        <Icon className="size-4" />
-      </button>
-      <Slider.Root
-        value={[volume]}
-        max={1}
-        step={0.01}
-        onValueChange={([v]) => onVolumeChange(v ?? 1)}
-        className="relative flex h-9 w-32 touch-none items-center sm:w-40"
-        aria-label="Preview volume"
-      >
-        <Slider.Track className="relative h-1 grow rounded-full bg-bg-subtle">
-          <Slider.Range className="absolute h-full rounded-full bg-accent" />
-        </Slider.Track>
-        <Slider.Thumb
-          className="block size-4 rounded-full bg-accent shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
-          aria-label="Volume level"
-        />
-      </Slider.Root>
-      <span className="w-10 font-mono text-xs text-muted tabular-nums">
-        {Math.round(volume * 100)}%
-      </span>
-    </div>
-  );
-}
-
-function ScoreBar({
-  label,
-  score,
-  parts,
-  cutoffHz,
-  highlighted,
-  dimmed,
-}: {
-  label: string;
-  score: number;
-  parts: ScoreParts;
-  cutoffHz: number;
-  highlighted: boolean;
-  dimmed: boolean;
-}) {
-  // Segments explain the total: bandwidth ceiling, rolloff shape, high-frequency
-  // air, spectral cleanliness. Widths are points of the 0–100 scale.
-  // NOTE: classes must stay full literals — Tailwind cannot see interpolated
-  // opacity suffixes and would purge them.
-  const segClass: Record<"win" | "muted", string[]> = {
-    win: ["bg-win/90", "bg-win/60", "bg-win/35", "bg-win/20"],
-    muted: ["bg-muted/70", "bg-muted/50", "bg-muted/30", "bg-muted/20"],
-  };
-  const segments = [
-    { key: "ceiling", label: "Bandwidth ceiling", pts: parts.ceiling },
-    { key: "rolloff", label: "Rolloff shape", pts: parts.rolloff },
-    { key: "air", label: "High-frequency air", pts: parts.air },
-    { key: "clarity", label: "Spectral cleanliness", pts: parts.clarity },
-  ] as const;
-  const tone = highlighted ? "win" : "muted";
-  // scoreOf can cap the total (noise-starved encodes) and docks clipping, so
-  // the parts may not add up to the score. Scale the bar to the real score
-  // and list the difference explicitly in the breakdown.
-  const positiveSum = segments.reduce((sum, s) => sum + s.pts, 0);
-  const barScale = positiveSum > score && positiveSum > 0 ? score / positiveSum : 1;
-  const capPts = score - (positiveSum + parts.clip);
-  const capped = capPts < -0.05;
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted">
-          {highlighted && <Trophy className="size-3 text-win" />}
-          {label}
-        </span>
-        <span className="font-mono text-xs text-faint tabular-nums">
-          {score.toFixed(0)}/100 · {formatHz(cutoffHz)}
-          {parts.clip < 0 && (
-            <span
-              className="text-loss"
-              title={`Sustained clipping docked ${parts.clip.toFixed(0)} points`}
-            >
-              {" "}
-              ({parts.clip.toFixed(0)})
-            </span>
-          )}
-        </span>
-      </div>
-      <div
-        className={cn(
-          "mt-1.5 flex h-1.5 gap-px overflow-hidden rounded-full bg-bg-subtle",
-          dimmed && "opacity-60",
-        )}
-        role="img"
-        aria-label={`${label} quality score ${score.toFixed(0)} out of 100: ceiling ${parts.ceiling.toFixed(0)}, rolloff ${parts.rolloff.toFixed(0)}, air ${parts.air.toFixed(0)}, clarity ${parts.clarity.toFixed(0)}${parts.clip < 0 ? `, clipping ${parts.clip.toFixed(0)}` : ""}`}
-      >
-        {segments.map((s, i) =>
-          s.pts > 0.05 ? (
-            <div
-              key={s.key}
-              title={`${s.label}: ${s.pts.toFixed(1)} pts`}
-              className={cn("h-full rounded-full", segClass[tone]![i])}
-              style={{ width: `${Math.min(100, s.pts * barScale)}%` }}
-            />
-          ) : null,
-        )}
-      </div>
-      <details className="mt-2 text-xs text-muted">
-        <summary className="min-h-9 cursor-pointer py-2 text-fg focus-visible:outline-2 focus-visible:outline-accent">
-          {label} score breakdown
-        </summary>
-        <p className="mb-2 leading-relaxed">
-          A composite score out of 100 based on bandwidth, rolloff, high-frequency content, and
-          spectral cleanliness. It describes the encoding evidence, not the musical performance.
-        </p>
-        <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5">
-          {segments.map((segment) => (
-            <div key={segment.key} className="contents">
-              <dt>{segment.label}</dt>
-              <dd className="font-mono">{segment.pts.toFixed(1)} pts</dd>
-            </div>
-          ))}
-          {parts.clip < 0 && (
-            <>
-              <dt>Sustained clipping deduction</dt>
-              <dd className="font-mono text-loss">{parts.clip.toFixed(1)} pts</dd>
-            </>
-          )}
-          {capped && (
-            <>
-              <dt>
-                Noise cap
-                <span className="block text-faint">
-                  Broadband hiss reads like a starved encode, so the score is held at 35 or below
-                </span>
-              </dt>
-              <dd className="font-mono text-loss">{capPts.toFixed(1)} pts</dd>
-            </>
-          )}
-          <dt className="border-t border-border pt-1.5 text-fg">Score</dt>
-          <dd className="border-t border-border pt-1.5 font-mono text-fg">
-            {score.toFixed(1)} / 100
-          </dd>
-        </dl>
-      </details>
-    </div>
-  );
-}
-
-/** Clip fractions at or below this display as "None". */
-const CLIP_SHOWN = 0.0003;
-
-function CompareTable({ a, b, winner }: { a: Analysis; b: Analysis; winner: SlotId | "tie" }) {
-  const rows: { label: string; av: string; bv: string; better?: SlotId | "tie" }[] = [
-    {
-      label: "Winner",
-      av: winner === "a" ? "Winner" : winner === "tie" ? "Tie" : "Runner-up",
-      bv: winner === "b" ? "Winner" : winner === "tie" ? "Tie" : "Runner-up",
-      better: winner,
-    },
-    {
-      label: "Quality score",
-      av: `${a.score.toFixed(0)} / 100`,
-      bv: `${b.score.toFixed(0)} / 100`,
-      better: Math.abs(a.score - b.score) < 3 ? "tie" : a.score > b.score ? "a" : "b",
-    },
-    {
-      label: "Spectral ceiling",
-      av: formatHz(a.cutoffHz),
-      bv: formatHz(b.cutoffHz),
-      better: Math.abs(a.cutoffHz - b.cutoffHz) < 400 ? "tie" : a.cutoffHz > b.cutoffHz ? "a" : "b",
-    },
-    {
-      label: "Container bitrate",
-      av: `${Math.round(a.containerKbps)} kbps`,
-      bv: `${Math.round(b.containerKbps)} kbps`,
-    },
-    {
-      label: "Header bitrate",
-      av: a.container.claimedKbps ? `${a.container.claimedKbps} kbps` : "—",
-      bv: b.container.claimedKbps ? `${b.container.claimedKbps} kbps` : "—",
-    },
-    {
-      label: "High-frequency occupancy",
-      av: `${Math.round(a.hfOccupancy * 100)}%`,
-      bv: `${Math.round(b.hfOccupancy * 100)}%`,
-      better:
-        Math.abs(a.hfOccupancy - b.hfOccupancy) < 0.04
-          ? "tie"
-          : a.hfOccupancy > b.hfOccupancy
-            ? "a"
-            : "b",
-    },
-    {
-      label: "Dynamic range (crest)",
-      av: `${a.crestDb.toFixed(1)} dB`,
-      bv: `${b.crestDb.toFixed(1)} dB`,
-      better: Math.abs(a.crestDb - b.crestDb) < 1 ? "tie" : a.crestDb > b.crestDb ? "a" : "b",
-    },
-    {
-      label: "Stereo width",
-      av: a.channels < 2 ? "Mono" : a.stereoWidth.toFixed(2),
-      bv: b.channels < 2 ? "Mono" : b.stereoWidth.toFixed(2),
-    },
-    {
-      label: "Clipping",
-      av: a.clipFraction > CLIP_SHOWN ? `${(a.clipFraction * 100).toFixed(2)}%` : "None",
-      bv: b.clipFraction > CLIP_SHOWN ? `${(b.clipFraction * 100).toFixed(2)}%` : "None",
-      // Two "None" cells are a tie, whatever the sub-threshold difference.
-      better:
-        (a.clipFraction <= CLIP_SHOWN && b.clipFraction <= CLIP_SHOWN) ||
-        Math.abs(a.clipFraction - b.clipFraction) < 0.0002
-          ? "tie"
-          : a.clipFraction < b.clipFraction
-            ? "a"
-            : "b",
-    },
-  ];
-
-  return (
-    <div className="overflow-hidden rounded-xl bg-bg-elevated">
-      <table className="w-full table-fixed text-left text-xs">
-        <caption className="sr-only">Audio comparison measurements for File A and File B</caption>
-        <thead className="border-b border-border font-mono tracking-widest text-faint uppercase">
-          <tr>
-            <th scope="col" className="w-[38%] px-4 py-3 font-normal sm:px-5">
-              Metric
-            </th>
-            <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
-              File A {winner === "a" && <Trophy aria-label="Winner" className="inline size-3" />}
-            </th>
-            <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
-              File B {winner === "b" && <Trophy aria-label="Winner" className="inline size-3" />}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.label} className="border-b border-border/70 last:border-b-0">
-              <th scope="row" className="px-4 py-3 font-normal text-muted sm:px-5">
-                {row.label}
-              </th>
-              <td
-                className={cn(
-                  "py-3 pr-2 font-mono tabular-nums",
-                  row.better === "a" ? "text-fg" : "text-muted",
-                )}
-              >
-                {row.av}
-              </td>
-              <td
-                className={cn(
-                  "py-3 pr-4 font-mono tabular-nums",
-                  row.better === "b" ? "text-fg" : "text-muted",
-                )}
-              >
-                {row.bv}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function HowTo() {
-  return (
-    <section className="rounded-xl bg-bg-elevated p-5 sm:p-6">
-      <div className="flex items-center gap-2 text-fg">
-        <Info className="size-4 text-muted" />
-        <h2 className="text-sm font-medium">How to read this</h2>
-      </div>
-      <ol className="mt-4 grid gap-4 text-sm leading-relaxed text-muted sm:grid-cols-3">
-        <li>
-          <p className="font-medium text-fg">Ignore the header</p>
-          <p className="mt-1">
-            File size and tagged bitrate can lie. A transcode of a 128 kbps MP3 still has a 16 kHz
-            ceiling even if it now says 320.
-          </p>
-        </li>
-        <li>
-          <p className="font-medium text-fg">Look for the black band</p>
-          <p className="mt-1">
-            Brightness is energy. A hard dark strip at the top of the spectrogram is the encoder's
-            low-pass — that is the real bitrate.
-          </p>
-        </li>
-        <li>
-          <p className="font-medium text-fg">Typical ceilings</p>
-          <p className="mt-1">
-            ~16 kHz ≈ 128 kbps · ~19 kHz ≈ 192–256 · 20 kHz+ with a natural fade into noise is
-            lossless or transparent.
-          </p>
-        </li>
-      </ol>
-      <p className="mt-5 text-xs text-faint">Files stay in this browser. Nothing is uploaded.</p>
-    </section>
   );
 }

@@ -8,10 +8,17 @@ import { cn } from "@/lib/utils";
  *  uses the same value so it stays aligned at any root font size. */
 const GUTTER_PX = 40;
 
+const TRACE_VARS = ["--color-trace-a", "--color-trace-b", "--color-trace-c", "--color-trace-d"];
+const TRACE_CLASS = ["text-trace-a", "text-trace-b", "text-trace-c", "text-trace-d"];
+const TRACE_BORDER = ["border-trace-a", "border-trace-b", "border-trace-c", "border-trace-d"];
+const TRACE_FALLBACKS = ["#8fbfb4", "#c4b49a", "#a8a4c8", "#c8a4b0"];
+const SLOTS: SlotId[] = ["a", "b", "c", "d"];
+
 type Props = {
-  a: Analysis | null;
-  b: Analysis | null;
-  winnerId?: SlotId | "tie" | null;
+  /** Ready analyses in slot order (up to 4), refined values already patched. */
+  files: (Analysis | null)[];
+  /** Slot letter whose trace gets the winner treatment (focused pair). */
+  winnerSlot?: SlotId | null;
   className?: string;
 };
 
@@ -25,10 +32,13 @@ function drawTrace(
   maxHz: number,
   dbMin: number,
   dbMax: number,
+  thin: boolean,
 ) {
   ctx.beginPath();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
+  // Slots C/D run thinner so a four-trace plot stays readable; winner-edge
+  // separation still comes from paint order and opacity below.
+  ctx.lineWidth = thin ? 1.2 : 1.5;
   let started = false;
   const last = Math.min(meanDb.length - 1, Math.floor(maxHz / hzPerBin));
   for (let k = 1; k <= last; k++) {
@@ -44,7 +54,7 @@ function drawTrace(
   ctx.stroke();
 }
 
-export function SpectrumPlot({ a, b, winnerId, className }: Props) {
+export function SpectrumPlot({ files, winnerSlot, className }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -68,13 +78,13 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       ctx.clearRect(0, 0, fullWidth, h);
       ctx.translate(GUTTER_PX, 0);
 
-      const maxHz = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
+      const maxHz = Math.max(22050, ...files.map((f) => f?.spectrogram.maxHz ?? 0));
       const dbMin = -90;
       // Loud low end must not flat-line against the top edge: lift the
       // ceiling to the next 10 dB above the hottest *drawn* bin (never below
       // -10). meanDb runs to Nyquist, past the plotted range on hi-res files.
       let peak = -Infinity;
-      for (const x of [a, b]) {
+      for (const x of files) {
         if (!x) continue;
         const last = Math.min(x.meanDb.length - 1, Math.floor(maxHz / x.meanDbHzPerBin));
         for (let k = 1; k <= last; k++) peak = Math.max(peak, x.meanDb[k]!);
@@ -106,22 +116,39 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       }
 
       const style = getComputedStyle(wrap);
-      const colA = style.getPropertyValue("--color-trace-a").trim() || "#8fbfb4";
-      const colB = style.getPropertyValue("--color-trace-b").trim() || "#c4b49a";
+      const traces = files
+        .map((f, i) => ({
+          x: f,
+          col: style.getPropertyValue(TRACE_VARS[i]!).trim() || TRACE_FALLBACKS[i]!,
+          slot: SLOTS[i]!,
+          index: i,
+        }))
+        .filter((t): t is { x: Analysis; col: string; slot: SlotId; index: number } => !!t.x);
 
       // Below the ceilings the traces overlap almost exactly; the winner
-      // paints last so it is never hidden, over a slightly faded loser.
+      // paints last so it is never hidden, over slightly faded losers.
       // Without a winner (tie / identical) neither trace is faded.
-      const traces = [
-        a && { x: a, col: colA, id: "a" as const },
-        b && { x: b, col: colB, id: "b" as const },
-      ].filter((t) => !!t);
-      const decided = winnerId === "a" || winnerId === "b";
-      if (winnerId === "a") traces.reverse();
-      traces.forEach((t, i) => {
-        ctx.globalAlpha = decided && i < traces.length - 1 ? 0.75 : 1;
-        ctx.setLineDash(t.id === "b" ? [6, 4] : []);
-        drawTrace(ctx, t.x.meanDb, t.x.meanDbHzPerBin, t.col, w, h, maxHz, dbMin, dbMax);
+      const decided = winnerSlot != null && traces.some((t) => t.slot === winnerSlot);
+      if (decided && winnerSlot != null) {
+        traces.sort((t1, t2) => (t1.slot === winnerSlot ? 1 : t2.slot === winnerSlot ? -1 : 0));
+      }
+      traces.forEach((t) => {
+        ctx.globalAlpha = decided && winnerSlot !== t.slot ? 0.75 : 1;
+        // Alternating dash makes even 4 coplanar traces traceable back to
+        // their legend chip.
+        ctx.setLineDash(t.index % 2 === 1 ? [6, 4] : []);
+        drawTrace(
+          ctx,
+          t.x.meanDb,
+          t.x.meanDbHzPerBin,
+          t.col,
+          w,
+          h,
+          maxHz,
+          dbMin,
+          dbMax,
+          t.index >= 2,
+        );
       });
       ctx.globalAlpha = 1;
       ctx.setLineDash([]);
@@ -144,8 +171,10 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
         ctx.textAlign = "left";
         ctx.fillText(text, labelX, y);
       };
-      if (a) mark(a.cutoffHz, colA, "A", 14);
-      if (b) mark(b.cutoffHz, colB, "B", 32);
+      // Ceiling markers stagger down the left edge in slot order; a bump of
+      // 14 px per trace keeps same-position ceilings legible instead of
+      // stacking labels on the same pixel row.
+      traces.forEach((t, i) => mark(t.x.cutoffHz, t.col, t.slot.toUpperCase(), 14 + i * 18));
     }
 
     paint();
@@ -163,13 +192,13 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [a, b, winnerId]);
+  }, [files, winnerSlot]);
 
-  if (!a && !b) return null;
+  if (!files.some((f) => f)) return null;
 
   // Same axis width the canvas paints (paint() clamps at 22050): labels must
   // sit at the true frequency positions, not at fixed thirds of the box.
-  const maxHzLabel = Math.max(a?.spectrogram.maxHz ?? 0, b?.spectrogram.maxHz ?? 0, 22050);
+  const maxHzLabel = Math.max(22050, ...files.map((f) => f?.spectrogram.maxHz ?? 0));
 
   return (
     <div className={cn("rounded-xl bg-bg-elevated p-4 sm:p-5", className)}>
@@ -177,23 +206,25 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
         <div>
           <h2 className="text-sm font-medium text-fg">Average spectrum</h2>
           <p className="mt-0.5 text-xs text-muted">
-            Level (dB) versus frequency · vertical range auto-scales. A cliff shows lost highs.
+            Base-analysis spectrum. Comparison markers may use shared-passage measurements. A cutoff
+            does not establish an original bitrate.
           </p>
         </div>
-        <div className="flex flex-wrap gap-4 font-mono text-xs">
-          {a && (
-            <span className="flex items-center gap-1.5 text-trace-a">
-              {winnerId === "a" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block w-5 border-t-2 border-trace-a" />A ·{" "}
-              {formatHz(a.cutoffHz)}
-            </span>
-          )}
-          {b && (
-            <span className="flex items-center gap-1.5 text-trace-b">
-              {winnerId === "b" && <Trophy className="size-3 text-win" />}
-              <span className="inline-block w-5 border-t-2 border-dashed border-trace-b" />B ·{" "}
-              {formatHz(b.cutoffHz)}
-            </span>
+        <div className="flex flex-wrap gap-3 font-mono text-xs sm:gap-4">
+          {files.map((f, i) =>
+            i < SLOTS.length && f ? (
+              <span key={SLOTS[i]} className={cn("flex items-center gap-1.5", TRACE_CLASS[i])}>
+                {winnerSlot === SLOTS[i] && <Trophy className="size-3 text-win" />}
+                <span
+                  className={cn(
+                    "inline-block w-5 border-t-2",
+                    i % 2 === 1 ? "border-dashed" : "",
+                    TRACE_BORDER[i],
+                  )}
+                />
+                {SLOTS[i]!.toUpperCase()} · {formatHz(f.cutoffHz)}
+              </span>
+            ) : null,
           )}
         </div>
       </div>
@@ -202,11 +233,7 @@ export function SpectrumPlot({ a, b, winnerId, className }: Props) {
           ref={canvasRef}
           className="block size-full"
           role="img"
-          aria-label={
-            a || b
-              ? `Average spectrum plot.${a ? ` File A ceiling ${formatHz(a.cutoffHz)}.` : ""}${b ? ` File B ceiling ${formatHz(b.cutoffHz)}.` : ""}`
-              : "Average spectrum plot"
-          }
+          aria-label={`Average spectrum plot.${files.map((f, i) => (f ? ` File ${SLOTS[i]!.toUpperCase()} ceiling ${formatHz(f.cutoffHz)}.` : "")).join("")}`}
         />
       </div>
       {/* Labels sit at the true frequency positions (the axis runs to the

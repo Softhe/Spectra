@@ -1,87 +1,83 @@
 # Spectra
 
-Which copy kept the air? Drop two files of the _same song_ from different
-sources (a SoundCloud MP3 vs an M4A, a WAV vs a FLAC) and Spectra tells you
-which one is actually higher quality — by reading the audio, not the header.
+Compare two local copies of the same recording for technical evidence of audio preservation, then listen at aligned positions and matched RMS level. Add up to two more copies when needed.
 
-![Spectra demo comparison](docs/screenshot.png)
+![Spectra comparison](docs/screenshot.png)
 
-Encoders write a bitrate in the header. That is a claim: a 320 kbps file
-upconverted from 128 still dies at 16 kHz. Spectra decodes each file in your
-browser, runs a spectral analysis, and finds the **spectral ceiling** — the
-frequency where the encoder truly gave up — plus rolloff character, a
-0–100 quality score, dynamics, and stereo info. Everything runs locally;
-**no file ever leaves your browser.**
+Spectra decodes and analyzes audio in your browser. Audio is not uploaded to an analysis service. Results are estimates, not certification of an original master, original encoding bitrate, lossless provenance, or audible superiority.
+
+## Reading a result
+
+- **Likely preserves more** means the measured differences support a relative preference between comparable copies.
+- **No clear quality difference detected** means the measurements do not support a preference. It does not establish equal fidelity.
+- **Not reliably comparable** means the recording match is uncertain or the files appear to contain different recordings.
+- **Shared-passage comparison unavailable** means both copies could not be measured over common passages. Playback remains available, but no quality preference is shown.
+
+Recording-match status and recommendation evidence are separate. Low/medium/high evidence labels are heuristic categories, not calibrated probabilities. Numerical scores are experimental indicators, not percentages of retained fidelity or universal ratings across songs.
+
+Codec, sample rate, stream bitrate and bit depth describe the file. The spectral characteristics describe its decoded audio. A FLAC container does not prove a pristine source; a sharp cutoff does not prove a particular previous bitrate. Filtering and noise can affect bandwidth measurements.
 
 ## Features
 
-- **True-bitrate detection** — spectral ceiling, brickwall/steep/natural
-  rolloff classification, and a codec-only quality score, calibrated on a
-  93-item labeled corpus (MP3, AAC, Opus, ALAC, transcodes, upconverts, at
-  44.1 and 48 kHz, plus 40-second and 16-minute files).
-- **Fake-lossless flagging** — a WAV/FLAC/ALAC that measures band-limited
-  gets called out, whatever the header claims.
-- **Side-by-side evidence** — per-file spectrograms with cutoff markers,
-  an overlaid average-spectrum plot, and a metric-by-metric table.
-- **A/B compare by ear** — one click previews both copies back-to-back at
-  the same position with RMS-matched loudness, plus a global volume slider.
-- **Honest ties** — quiet/acoustic material with no high-frequency content
-  is reported as source-limited instead of misgraded.
-- **Fast on big files** — DSP runs in a Web Worker, results are cached in
-  IndexedDB (re-drops resolve instantly), and 15+ minute files analyze from
-  excerpts with a "Lite" badge instead of exhausting memory.
+- Browser decoding with worker DSP and an IndexedDB analysis cache.
+- Envelope-based recording matching and trim alignment, with an uncertain outcome for insufficient evidence.
+- Shared-passage remeasurement, including equal-length copies. Displays actual analyzed duration separately from the overlapping timeline. Incomplete refinement cannot silently create a preference from mismatched measurements.
+- Estimated bandwidth and rolloff, sustained clipping indicators, crest factor and stereo measurements.
+- Aligned A/B playback, RMS level matching, short loops, swapping, and a blind listening mode that hides identity and measurements until reveal.
+- Optional third/fourth copies with pairwise comparisons. Ineligible comparisons do not earn ranking points.
+- Streaming PCM WAV analysis for large files, including RF64 ds64 data lengths. Unsupported or malformed headers are rejected rather than given guessed giant sizes.
+- Integer-grid bit-depth checks. Silence does not establish content depth, and a detected lower integer grid is not a provenance certificate.
 
-## Quickstart
+## Local development
 
-Requires Node 22.
+Requires Node.js 22 or newer. Install the lockfile dependencies:
 
 ```sh
-npm install
-npm run dev      # http://0.0.0.0:8080
-npm run build    # production bundle + DB migrate (skips without DATABASE_URL)
-npm run typecheck
-npm test         # repo unit suites
+npm ci
+npm run dev
 ```
 
-Drop two audio files (MP3, M4A/AAC, WAV, FLAC, AIFF, OGG/Opus, WebM) into
-File A and File B — or press **Load a demo comparison** to see a full-range
-master called out against a 16 kHz brickwalled rip hiding behind identical
-headers. Apple Lossless (ALAC `.m4a`) decodes only in Safari; elsewhere,
-convert it to FLAC or WAV first.
+The local development page is at http://127.0.0.1:8080. Auth is disabled in the checked-in app flag. No database or API key is needed for audio comparison.
 
-## How it works
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
 
-`src/lib/audio/analyze.ts` is the engine: Web Audio decode → mono mix-down
-with sustained-clip detection → windowed STFT (4096-pt Hann, 50% overlap)
-over loudness-ranked regions → occupancy + mean-spectrum cliff detection for
-the cutoff → ratio-aware quality classes → composite score → verdict with
-jitter-proof win margins. Header sniffing (`sniff.ts`) is deliberately
-distrusted: VBR MP3s report unknown bitrate instead of the first-frame
-placeholder, and MP3 is only claimed after a confirmed frame sync. M4A's
-index is found wherever it sits in the file (even after the audio), and the
-codec comes from the sample entry, so ALAC isn't mistaken for AAC.
+The test runner works without POSIX shell syntax. The environment wrapper resolves local JavaScript command bins on Windows without invoking a command shell. Database migration skips when DATABASE_URL is absent.
 
-The DSP core (`runDsp`) is shared verbatim between the main-thread fallback
-and `dsp.worker.ts`, so both paths produce identical numbers by construction.
+Browser smoke checks accept output paths inside this project:
 
-## Validating with the corpus
+```sh
+node scripts/browser-smoke.mjs http://127.0.0.1:8080/ screenshots/dev.png
+```
 
-`scripts/corpus/` holds the reproducible harness behind the numbers above
-(see its README for the recipe): synth → encode at known bitrates → decode
-with the browser's own decoder → score with the real detection code. The
-93-item corpus covers 44.1 and 48 kHz encodes (AAC, Opus, MP3, ALAC), long
-and 16-minute Lite items, and M4As with the index at the end. The scorer
-prints the confusion matrix, the reference verdicts and PASS/FAIL
-calibration checks; any threshold change must keep every check passing.
-Seven known 48 kHz-vs-44.1 kHz calibration gaps are listed in `KNOWN_GAPS`
-(`score-corpus.mjs`) and reported as XFAIL until a dedicated recalibration;
-a gap that starts passing reports XPASS and fails the run until removed.
+The helper checks desktop/mobile rendering, errors, overflow, branding and auth invariants. Visually inspect its screenshots as well. Use a distinct output path and --baseline for built-output comparison.
 
-## Privacy
+## Audio support
 
-Analysis is 100% client-side. Files are read via blob URLs and object URLs
-that never leave the tab; the IndexedDB result cache stays on your device.
+Drop supported MP3, M4A/AAC, WAV, FLAC, AIFF, OGG/Opus or WebM files into the slots. Support ultimately depends on the browser decoder. ALAC M4A may be unsupported in the browser being used; convert a separate test copy to a supported lossless format when necessary. Decoder failures are reported without a quality verdict.
+
+## Validation and private audio
+
+The synthetic corpus and its known calibration gaps are documented in scripts/corpus/README.md. A passing unit suite is not proof of calibrated quality detection. Encode/decode toolchain changes and synthetic signal changes require separate baseline review.
+
+The opt-in playlist runner accepts explicitly selected files inside a dedicated audio-tests directory. It never discovers a listening library, extracts archives, converts inputs in place, or uploads audio. It limits input size, duration and estimated decoded memory, runs sequentially, hashes inputs before/after, and checkpoints each pair into a separate local run directory.
+
+See scripts/corpus/README.md for its cases.json format and invocation. Keep private audio, tags, filenames and full reports out of Git. Use anonymous fixture identifiers in shareable evidence. Use separate extracted copies and retain the original ZIPs.
+
+## Implementation
+
+- src/lib/audio/analyze.ts: browser analysis and the shared comparison decision.
+- src/lib/audio/align.ts: envelope matching and lag estimates.
+- src/lib/audio/refine.ts: aligned common windows and coverage metadata.
+- src/lib/audio/rank.ts: consistent refined values and pairwise eligibility.
+- src/lib/audio/wav-source.ts: bounded PCM WAV/RF64 reading.
+
+The DSP functions are shared between workers and the main-thread fallback. The result cache uses sampled hashes for reuse; these are not full-file identity proofs. No exact-file-equivalence claim is made from those cache keys.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See LICENSE.

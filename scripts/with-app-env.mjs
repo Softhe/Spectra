@@ -20,7 +20,7 @@
  * `process.env`, which is why the merge has to happen before Vite starts.
  */
 import { spawn } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -111,7 +111,23 @@ function main(argv) {
     process.exit(2);
   }
   const env = mergeAppEnv(readAppEnv(projectRoot()), process.env);
-  const child = spawn(command, args, { stdio: "inherit", env });
+  // Resolve npm package bins to JavaScript on Windows without invoking a shell.
+  let executable = command;
+  let childArgs = args;
+  if (process.platform === "win32" && /^[a-z0-9-]+$/i.test(command)) {
+    const packageDir = join(projectRoot(), "node_modules", command);
+    try {
+      const pkg = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+      const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[command];
+      if (bin && existsSync(join(packageDir, bin))) {
+        executable = process.execPath;
+        childArgs = [join(packageDir, bin), ...args];
+      }
+    } catch {
+      /* Commands without a local package use the system PATH. */
+    }
+  }
+  const child = spawn(executable, childArgs, { stdio: "inherit", env });
   // The dev server is long-running and is stopped by signalling this wrapper.
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     process.on(signal, () => child.kill(signal));

@@ -5,6 +5,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import {
+  analyzeFile,
+  scanSourceStats,
+  bitGridCheck,
   classifyQuality,
   compareAnalyses,
   decodeErrorMessage,
@@ -15,7 +18,54 @@ import {
 } from "./analyze.ts";
 import { fft } from "./fft.ts";
 import { sniffContainer } from "./sniff.ts";
+import { rankedIds } from "./rank.ts";
+import { sharedClipFraction } from "./refine.ts";
 import type { Analysis, QualityClass, RolloffKind } from "./types.ts";
+
+describe("resource and invalid-sample guards", () => {
+  it("counts clipping only inside measured passages and resets runs between them", () => {
+    const audio = new Float32Array(100).fill(1);
+    audio.fill(0, 20, 80);
+    assert.equal(sharedClipFraction(audio, [{ start: 20, end: 80 }]), 0);
+    assert.equal(sharedClipFraction(audio, [{ start: 0, end: 20 }]), 1);
+    assert.equal(
+      sharedClipFraction(audio, [
+        { start: 0, end: 10 },
+        { start: 90, end: 100 },
+      ]),
+      0,
+    );
+  });
+  it("rejects oversized non-WAV files without reading the full file", async () => {
+    const file = new File([new Uint8Array(64)], "large.flac");
+    Object.defineProperty(file, "size", { value: 700 * 1024 * 1024 });
+    Object.defineProperty(file, "arrayBuffer", {
+      value: () => {
+        throw new Error("full read attempted");
+      },
+    });
+    await assert.rejects(
+      analyzeFile(file),
+      (error: Error) => !error.message.includes("full read attempted"),
+    );
+  });
+  it("keeps streaming statistics finite when channels contain invalid samples", async () => {
+    const left = new Float32Array(512).fill(0.25);
+    const right = new Float32Array(512).fill(0.25);
+    left[20] = NaN;
+    right[30] = Infinity;
+    const stats = await scanSourceStats({
+      sampleRate: 8000,
+      length: 512,
+      numberOfChannels: 2,
+      async sliceChannels(start, end) {
+        return [left.slice(start, end), right.slice(start, end)];
+      },
+    });
+    for (const value of [stats.rmsDb, stats.crestDb, stats.stereoWidth, ...stats.envelope.power])
+      assert.ok(Number.isFinite(value));
+  });
+});
 
 function mkAnalysis(o: {
   id?: string;
@@ -36,6 +86,13 @@ function mkAnalysis(o: {
     mimeType: "",
     objectUrl: "",
     durationSec: o.duration ?? 146,
+    envelope: {
+      blockSec: 0.125,
+      power: Float32Array.from(
+        { length: 160 },
+        (_, i) => 1 + 0.2 * Math.sin(i / 7) + 0.1 * Math.cos(i / 13),
+      ),
+    },
     sampleRate: 44100,
     channels: 2,
     container: {
@@ -160,6 +217,76 @@ describe("scoreOf", () => {
 });
 
 describe("compareAnalyses", () => {
+  it("does not award points for unavailable shared measurements or uncertain recordings", () => {
+    const files = [mkAnalysis({ id: "a", score: 95 }), mkAnalysis({ id: "b", score: 40 })];
+    const excluded = new Set<string>();
+    const pending = rankedIds(files, undefined, excluded, true);
+    assert.deepEqual(pending.pointsById, { a: 0, b: 0 });
+    assert.equal(pending.outsiders.size, 2);
+    assert.equal(excluded.size, 0);
+    const short = { blockSec: 0.125, power: new Float32Array([1, 2, 3]) };
+    const uncertain = rankedIds(files.map((file) => ({ ...file, envelope: short })));
+    assert.deepEqual(uncertain.pointsById, { a: 0, b: 0 });
+    assert.equal(uncertain.outsiders.size, 2);
+  });
+  it("withholds a preference when either recording envelope is absent", () => {
+    const a = mkAnalysis({ cutoff: 22000, score: 95 });
+    const b = mkAnalysis({ cutoff: 12000, score: 40 });
+    const c = compareAnalyses({ ...a, envelope: undefined }, b);
+    assert.equal(c.winner, "tie");
+    assert.equal(c.identityStatus, "unverified");
+    assert.equal(c.outcome, "not-comparable");
+  });
+  it("withholds a large apparent quality lead when recording identity is uncertain", () => {
+    const envelope = {
+      blockSec: 0.125,
+      power: Float32Array.from({ length: 32 }, (_, i) => 1 + Math.sin(i)),
+    };
+    const c = compareAnalyses(
+      { ...mkAnalysis({ cutoff: 22000, score: 95 }), envelope },
+      { ...mkAnalysis({ cutoff: 12000, score: 40 }), envelope },
+    );
+    assert.equal(c.winner, "tie");
+    assert.equal(c.outcome, "not-comparable");
+    assert.deepEqual(c.reasons, ["identity-uncertain"]);
+  });
+
+  it("does not compare a refined file against an unrefined or differently measured copy", () => {
+    const shared = {
+      status: "shared" as const,
+      key: "windows-1",
+      measuredSec: 16,
+      overlapSec: 158,
+      windows: 4,
+    };
+    const a = { ...mkAnalysis({ cutoff: 22000, score: 95 }), comparisonCoverage: shared };
+    for (const coverage of [
+      undefined,
+      { status: "unavailable" as const },
+      { ...shared, key: "windows-2" },
+    ]) {
+      const c = compareAnalyses(a, {
+        ...mkAnalysis({ cutoff: 12000, score: 40 }),
+        comparisonCoverage: coverage,
+      });
+      assert.equal(c.winner, "tie");
+      assert.deepEqual(c.reasons, ["shared-measurement-unavailable"]);
+    }
+    const c = compareAnalyses(a, {
+      ...mkAnalysis({ cutoff: 12000, score: 40 }),
+      comparisonCoverage: shared,
+    });
+    assert.equal(c.winner, "a");
+    assert.equal(c.coverage?.measuredSec, 16);
+    assert.equal(c.coverage?.overlapSec, 158);
+  });
+
+  it("describes a neutral measurement without claiming equal fidelity", () => {
+    const c = compareAnalyses(mkAnalysis({}), mkAnalysis({}));
+    assert.equal(c.outcome, "inconclusive");
+    assert.equal(c.headline, "No clear quality difference detected");
+    assert.match(c.detail, /do not establish equal fidelity/);
+  });
   it("declares the wider-bandwidth copy winner on the reported user case", () => {
     const c = compareAnalyses(
       mkAnalysis({
@@ -184,7 +311,7 @@ describe("compareAnalyses", () => {
     );
     assert.equal(c.winner, "a");
     assert.equal(c.confidence, "high");
-    assert.match(c.headline, /Winner: File A/);
+    assert.match(c.headline, /File A likely preserves more/);
     assert.match(c.detail, /WAV.*band-limited/);
   });
   it("lets a 1-point score gap not veto kilohertz of bandwidth, but a 20-point gap does", () => {
@@ -229,7 +356,7 @@ describe("compareAnalyses", () => {
       mkAnalysis({ id: "B", cutoff: 22039, score: 93, limited: true }),
     );
     assert.equal(c.winner, "tie");
-    assert.match(c.detail, /reflects the music itself/);
+    assert.match(c.detail, /estimate, not proof/);
   });
   it("never claims more air for a score win over an equal-or-higher ceiling", () => {
     // A: natural 19 kHz, B: brickwalled 20 kHz — the score overrides the
@@ -250,7 +377,7 @@ describe("compareAnalyses", () => {
     );
     assert.match(
       wide.detail,
-      /^22\.0 kHz of real bandwidth versus 16\.0 kHz — 6\.0 kHz more air kept\./,
+      /^22\.0 kHz of estimated bandwidth versus 16\.0 kHz — 6\.0 kHz more measured high-frequency reach\./,
     );
   });
   it("flags a band-limited CAF wrapper like the other lossless shells", () => {
@@ -260,6 +387,63 @@ describe("compareAnalyses", () => {
     );
     assert.equal(c.winner, "a");
     assert.match(c.detail, /CAF .*band-limited/);
+  });
+});
+
+describe("bitGridCheck", () => {
+  const signal = (n: number, bits: number, dither = false) => {
+    const x = new Float32Array(n);
+    const scale = 2 ** (bits - 1);
+    for (let i = 0; i < n; i++) {
+      const v = 0.5 * Math.sin(i * 0.0137) + 0.2 * Math.sin(i * 0.31);
+      x[i] = dither ? v + (Math.random() - 0.5) / 2 ** 23 : Math.round(v * scale) / scale;
+    }
+    return x;
+  };
+
+  it("reads 16-bit content padded into a 24-bit container as 16", () => {
+    assert.equal(bitGridCheck([signal(20_000, 16), signal(20_000, 16)]), 16);
+  });
+
+  it("reads honest 24-bit content as 24", () => {
+    assert.equal(bitGridCheck([signal(20_000, 24)]), 24);
+  });
+
+  it("returns null for digital silence instead of claiming 16-bit", () => {
+    assert.equal(bitGridCheck([new Float32Array(200_000)]), null);
+  });
+
+  it("needs every channel on the grid: one 24-bit channel disproves a pad", () => {
+    assert.equal(bitGridCheck([signal(20_000, 16), signal(20_000, 24)]), 24);
+  });
+
+  it("returns null for off-grid (resampled / float) audio", () => {
+    const x = new Float32Array(20_000).map((_, i) => 0.3 * Math.sin(i * 0.01) + 1e-9 * i);
+    assert.equal(bitGridCheck([x]), null);
+  });
+});
+
+describe("compareAnalyses · labels and pad notes", () => {
+  it("writes the slots' real letters into the prose", () => {
+    const c = compareAnalyses(
+      mkAnalysis({ id: "c", cutoff: 20000, score: 90 }),
+      mkAnalysis({ id: "a", cutoff: 16000, score: 60, rolloff: "brickwall" }),
+      { a: "C", b: "A" },
+    );
+    assert.equal(c.winner, "a");
+    assert.match(c.headline, /File C/);
+    assert.match(c.detail, /File A has a sharp spectral cutoff/);
+  });
+
+  it("notes a padded container once, in ties too", () => {
+    const pad = { ...mkAnalysis({ id: "p", codec: "FLAC" }), effectiveBits: 16 };
+    pad.container = { ...pad.container, bitDepth: 24 };
+    const honest = mkAnalysis({ id: "h", codec: "FLAC" });
+    const loses = compareAnalyses(honest, { ...pad, cutoffHz: 16000, score: 50 });
+    assert.equal(loses.detail.match(/stores 16-bit audio/g)?.length, 1);
+    const tie = compareAnalyses(honest, pad);
+    assert.equal(tie.winner, "tie");
+    assert.equal(tie.detail.match(/stores 16-bit audio/g)?.length, 1);
   });
 });
 

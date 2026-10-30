@@ -1,3 +1,4 @@
+import { Crosshair, RefreshCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -9,17 +10,26 @@ import {
 } from "react";
 import { buildLut, DB_MAX, DB_MIN } from "@/lib/audio/colormap";
 import { formatHz } from "@/lib/audio/format";
-import type { Analysis } from "@/lib/audio/types";
+import type { Analysis, SpectrogramData } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
 const lut = buildLut();
 
 type Props = {
   analysis: Analysis;
+  /**
+   * A user-pinned excerpt scan (re-scan at the playhead). When present the
+   * picture renders it instead of the file's default excerpt, and the time
+   * axis follows its position/duration.
+   */
+  override?: SpectrogramData | null;
+  /** Clears the pinned excerpt (button is only shown when one is pinned). */
+  onResetOverride?: () => void;
   className?: string;
 };
 
-export function SpectrogramCanvas({ analysis, className }: Props) {
+export function SpectrogramCanvas({ analysis, override, onResetOverride, className }: Props) {
+  const data = override ?? analysis.spectrogram;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hoverRaf = useRef(0);
@@ -31,15 +41,14 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
   // Previously every mount AND every resize ran a per-device-pixel JS loop
   // (~0.5M LUT lookups); resize is now a single GPU drawImage.
   const spectrumImage = useMemo(() => {
-    const { spectrogram } = analysis;
-    const { frames, nFrames, nBins } = spectrogram;
+    const { frames, nFrames, nBins } = data;
     const off = document.createElement("canvas");
     off.width = Math.max(1, nFrames);
     off.height = Math.max(1, nBins);
     const ctx = off.getContext("2d");
     if (!ctx) return off;
     const img = ctx.createImageData(off.width, off.height);
-    const data = img.data;
+    const imgData = img.data;
     const span = DB_MAX - DB_MIN;
     for (let y = 0; y < off.height; y++) {
       // Canvas row 0 is the top = highest frequency.
@@ -49,15 +58,15 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
         const db = frames[frame * nBins + bin] ?? DB_MIN;
         const u = Math.max(0, Math.min(255, Math.round(((db - DB_MIN) / span) * 255)));
         const o = (y * off.width + x) * 4;
-        data[o] = lut[u * 4]!;
-        data[o + 1] = lut[u * 4 + 1]!;
-        data[o + 2] = lut[u * 4 + 2]!;
-        data[o + 3] = 255;
+        imgData[o] = lut[u * 4]!;
+        imgData[o + 1] = lut[u * 4 + 1]!;
+        imgData[o + 2] = lut[u * 4 + 2]!;
+        imgData[o + 3] = 255;
       }
     }
     ctx.putImageData(img, 0, 0);
     return off;
-  }, [analysis]);
+  }, [data]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -81,7 +90,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
     ctx.drawImage(spectrumImage, 0, 0, w, h);
 
     const { cutoffHz, nyquistHz } = analysis;
-    const { maxHz } = analysis.spectrogram;
+    const maxHz = data.maxHz;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     // A ceiling at/above the displayed top (full-band 48 kHz / hi-res files)
     // has no in-view edge to mark. cutoffHz is clamped to the decode Nyquist,
@@ -108,7 +117,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
       ctx.lineTo(cssW, ny);
       ctx.stroke();
     }
-  }, [analysis, spectrumImage]);
+  }, [analysis, data, spectrumImage]);
 
   useEffect(() => {
     draw();
@@ -140,7 +149,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
       if (!wrap) return;
       const rect = wrap.getBoundingClientRect();
       const t = 1 - (clientY - rect.top) / rect.height;
-      setHover(Math.max(0, Math.min(analysis.spectrogram.maxHz, t * analysis.spectrogram.maxHz)));
+      setHover(Math.max(0, Math.min(data.maxHz, t * data.maxHz)));
     });
   }
 
@@ -150,7 +159,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
     else if (e.key === "ArrowDown") delta = -hoverStepHz;
     else if (e.key === "Home") {
       e.preventDefault();
-      setHover(analysis.spectrogram.maxHz);
+      setHover(data.maxHz);
       return;
     } else if (e.key === "End") {
       e.preventDefault();
@@ -161,25 +170,25 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
     }
     e.preventDefault();
     setHover((h) => {
-      const base = h ?? analysis.spectrogram.maxHz / 2;
-      return Math.max(0, Math.min(analysis.spectrogram.maxHz, base + delta));
+      const base = h ?? data.maxHz / 2;
+      return Math.max(0, Math.min(data.maxHz, base + delta));
     });
   }
 
   // Keyboard probes need a percentage position — no rect measurement at
   // render time. Pointer probes land on the same representation.
-  const hoverTop = hover == null ? null : (1 - hover / analysis.spectrogram.maxHz) * 100;
+  const hoverTop = hover == null ? null : (1 - hover / data.maxHz) * 100;
 
   // Axis positions are percent-from-top of the 0..maxHz column. The tick set
-  // is fixed so File A and File B read against identical axes; the measured
+  // is fixed so every file reads against identical axes; the measured
   // ceiling gets its own label on the dashed line inside the plot instead of
   // displacing a tick (which made the two axes differ at a glance).
-  const pctOf = (hz: number) => (1 - hz / analysis.spectrogram.maxHz) * 100;
+  const pctOf = (hz: number) => (1 - hz / data.maxHz) * 100;
   const ceilingPct = Math.max(0, pctOf(analysis.cutoffHz));
-  const ceilingInView = analysis.cutoffHz < analysis.spectrogram.maxHz - 0.5;
+  const ceilingInView = analysis.cutoffHz < data.maxHz - 0.5;
   // Near the top there is no room above the line, so the label hangs below it.
   const ceilingLabelBelow = ceilingPct < 12;
-  const ticks = [0, 5, 10, 15, 20].filter((k) => k * 1000 <= analysis.spectrogram.maxHz + 50);
+  const ticks = [0, 5, 10, 15, 20].filter((k) => k * 1000 <= data.maxHz + 50);
 
   return (
     <div className={cn("flex gap-2", className)}>
@@ -195,7 +204,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
           onKeyDown={onProbeKey}
           onFocus={() =>
             // Arriving by keyboard should show something to move immediately.
-            setHover((h) => h ?? analysis.spectrogram.maxHz / 2)
+            setHover((h) => h ?? data.maxHz / 2)
           }
           onBlur={() => setHover(null)}
         >
@@ -203,7 +212,7 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
             ref={canvasRef}
             className="block size-full"
             role="img"
-            aria-label={`Spectrogram of ${analysis.fileName}, ceiling ${formatHz(analysis.cutoffHz)}`}
+            aria-label={`Spectrogram of ${analysis.fileName}${override ? `, scanned window from ${override.excerptStartSec.toFixed(1)} s` : ""}, ceiling ${formatHz(analysis.cutoffHz)}`}
           />
           <span
             className={cn(
@@ -222,11 +231,27 @@ export function SpectrogramCanvas({ analysis, className }: Props) {
             />
           )}
         </div>
-        <div className="mt-1.5 flex justify-between font-mono text-[11px] text-faint">
-          <span>{analysis.spectrogram.excerptStartSec.toFixed(1)}s</span>
-          <span>excerpt</span>
+        <div className="mt-1.5 flex items-center justify-between gap-2 font-mono text-[11px] text-faint">
+          <span>{data.excerptStartSec.toFixed(1)}s</span>
+          {override ? (
+            <button
+              type="button"
+              onClick={onResetOverride}
+              className="inline-flex items-center gap-1 rounded bg-bg-subtle px-1.5 py-0.5 text-fg"
+              aria-label="Reset to the default excerpt"
+            >
+              <RefreshCw className="size-3" />
+              pinned {override.excerptStartSec.toFixed(1)}–
+              {(override.excerptStartSec + override.durationSec).toFixed(1)}s · reset
+            </button>
+          ) : (
+            <span className="flex items-center gap-1 text-muted">
+              <Crosshair className="size-3" aria-hidden />
+              excerpt
+            </span>
+          )}
           <span>
-            {(analysis.spectrogram.excerptStartSec + analysis.spectrogram.durationSec).toFixed(1)}s
+            {(data.excerptStartSec + data.durationSec).toFixed(1)}s
           </span>
         </div>
       </div>
