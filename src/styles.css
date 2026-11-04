@@ -118,3 +118,14 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Now-playing equalizer bars in the A/B listening bar. */
+@keyframes spectra-eq {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}

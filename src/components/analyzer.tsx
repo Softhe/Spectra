@@ -1,4 +1,4 @@
-import { AudioLines, Eye, EyeOff, Repeat } from "lucide-react";
+import { AudioLines, Eye, EyeOff, Lock, Plus, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
 import {
@@ -973,21 +973,32 @@ export function Analyzer() {
 
   return (
     <div
-      className="min-h-dvh bg-bg text-fg"
+      className="relative min-h-dvh overflow-x-clip bg-bg text-fg"
       onDragOver={(e) => e.preventDefault()}
       onDrop={onWindowDrop}
     >
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 sm:py-10">
+      {/* Faint two-tone glow behind the header, in the A/B trace colours. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-[radial-gradient(40rem_16rem_at_15%_-10%,color-mix(in_oklab,var(--color-trace-a)_14%,transparent),transparent),radial-gradient(36rem_14rem_at_85%_-20%,color-mix(in_oklab,var(--color-trace-b)_10%,transparent),transparent)]"
+      />
+      <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 sm:py-10">
         <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div className="max-w-xl">
-            <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">Spectra</p>
-            <h1 className="mt-2 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
-              Compare audio copies
+            <p className="flex items-center gap-2 font-mono text-[11px] tracking-[0.22em] text-muted uppercase">
+              <LogoMark />
+              Spectra
+            </p>
+            <h1 className="mt-3 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
+              Which copy kept more of the recording?
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
               Compare two copies of the same recording. Spectra aligns shared passages and shows the
-              measured evidence, or explains when no clear preference is possible. Your audio stays
-              in this browser.
+              measured evidence, or explains when no clear preference is possible.
+            </p>
+            <p className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-bg-elevated px-2.5 py-1 text-xs text-muted shadow-[var(--shadow-border)]">
+              <Lock className="size-3" aria-hidden />
+              Your audio stays in this browser
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1000,7 +1011,7 @@ export function Analyzer() {
               {blind ? "Exit blind test" : "Blind test"}
             </Button>
             <Button
-              variant="outline"
+              variant={readySlots.length === 0 ? "default" : "outline"}
               onClick={() => void loadDemo()}
               disabled={demoBusy || SLOT_KEYS.some((id) => slots[id].status === "loading")}
             >
@@ -1149,12 +1160,14 @@ export function Analyzer() {
         </div>
 
         {visibleSlotCount < 4 && !blindHidden && (
-          <Button
-            variant="outline"
+          <button
+            type="button"
             onClick={() => setVisibleSlotCount((count) => Math.min(4, count + 1))}
+            className="-mt-4 inline-flex h-11 items-center justify-center gap-2 self-center rounded-full px-5 text-sm text-muted shadow-[var(--shadow-border)] transition-colors hover:bg-bg-elevated hover:text-fg focus-visible:outline-2 focus-visible:outline-accent"
           >
-            Add another copy
-          </Button>
+            <Plus className="size-4" />
+            Add a {visibleSlotCount === 2 ? "third" : "fourth"} copy
+          </button>
         )}
 
         {ranking && readyFiles.length > 2 && !blindHidden && (
@@ -1197,5 +1210,17 @@ export function Analyzer() {
         <HowTo />
       </div>
     </div>
+  );
+}
+
+/** Four bars in the trace colours: the A/B/C/D key, as a wordmark glyph. */
+function LogoMark() {
+  return (
+    <svg viewBox="0 0 16 16" className="size-4" aria-hidden>
+      <rect x="1" y="6" width="2.5" height="9" rx="1.25" fill="var(--color-trace-a)" />
+      <rect x="5" y="2" width="2.5" height="13" rx="1.25" fill="var(--color-trace-b)" />
+      <rect x="9" y="8" width="2.5" height="7" rx="1.25" fill="var(--color-trace-c)" />
+      <rect x="13" y="4" width="2.5" height="11" rx="1.25" fill="var(--color-trace-d)" />
+    </svg>
   );
 }

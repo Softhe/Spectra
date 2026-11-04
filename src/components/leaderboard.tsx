@@ -1,6 +1,6 @@
 import { Headphones } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SLOT_LABELS } from "@/components/file-slot";
+import { SLOT_LABELS, SlotBadge } from "@/components/file-slot";
 import { pairComparison } from "@/lib/audio/rank";
 import type { Ranking } from "@/lib/audio/rank";
 import type { Refinement } from "@/lib/audio/refine";
@@ -84,8 +84,12 @@ export function Leaderboard({
               </span>
               {slot && (
                 <span
-                  className={cn("font-mono text-xs tracking-widest uppercase", TRACE_CLASS[slot])}
+                  className={cn(
+                    "inline-flex items-center gap-2 font-mono text-xs tracking-widest uppercase",
+                    TRACE_CLASS[slot],
+                  )}
                 >
+                  <SlotBadge slot={slot} className="size-5 text-[11px]" />
                   {SLOT_LABELS[slot]}
                 </span>
               )}

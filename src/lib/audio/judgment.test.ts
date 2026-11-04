@@ -818,6 +818,26 @@ describe("makeDemoFiles", () => {
     assert.equal(String.fromCharCode(...new Uint8Array(a1, 0, 4)), "RIFF");
     assert.equal(String.fromCharCode(...new Uint8Array(a1, 8, 4)), "WAVE");
   });
+
+  it("is long enough to be verified as one recording", async () => {
+    // The demo once ran 6.5 s, below the 12 s matching minimum, so it always
+    // landed on "Recording match is uncertain" and never showed a comparison.
+    const { makeDemoFiles } = await import("./demo.ts");
+    const { envelopeFromMono, songMatchOf } = await import("./align.ts");
+    const files = await makeDemoFiles();
+    const mono = async (f: File) => {
+      const pcm = new Int16Array((await f.arrayBuffer()).slice(44));
+      const out = new Float32Array(pcm.length / 2);
+      for (let i = 0; i < out.length; i++) out[i] = (pcm[2 * i]! + pcm[2 * i + 1]!) / 65536;
+      return out;
+    };
+    const match = songMatchOf(
+      envelopeFromMono(await mono(files.a), 44100),
+      envelopeFromMono(await mono(files.b), 44100),
+    );
+    assert.equal(match.status, "same");
+    assert.equal(match.lagSec, 0);
+  });
 });
 
 describe("sniffContainer", () => {
