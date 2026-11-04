@@ -706,8 +706,12 @@ export async function detectCutoff(
   const smDb = smooth(meanDb, 3);
   const slopeHi = Math.min(16000, nyquist - 100);
   const slopeOctaves = Math.log2(slopeHi / 10000);
+  // Below a quarter octave (Nyquist ≲ 12 kHz) the dB difference is divided
+  // by a near-zero span and turns bin noise into a huge fake slope.
   const hfSlope =
-    slopeOctaves > 0 ? ((smDb[binAt(slopeHi)] ?? 0) - (smDb[binAt(10000)] ?? 0)) / slopeOctaves : 0;
+    slopeOctaves >= 0.25
+      ? ((smDb[binAt(slopeHi)] ?? 0) - (smDb[binAt(10000)] ?? 0)) / slopeOctaves
+      : 0;
 
   if (steepest > 0.32 && dropBin * binHz < nyquist - 400) {
     rolloff = "brickwall";
@@ -887,7 +891,7 @@ export function scoreOf(input: {
   return { total: Math.max(0, Math.min(100, total)), parts };
 }
 
-function resampleFramesToDisplay(
+export function resampleFramesToDisplay(
   frames: Float32Array[],
   sampleRate: number,
   excerptStartSec: number,
@@ -904,8 +908,12 @@ function resampleFramesToDisplay(
     const src = frames[t]!;
     for (let b = 0; b < nBins; b++) {
       const hz = (b / (nBins - 1)) * maxHz;
-      const srcK = hz / srcBinHz;
-      const k0 = Math.min(srcBins - 2, Math.max(0, Math.floor(srcK)));
+      // Clamp to the last real bin before interpolating. At the top row of a
+      // 44.1 kHz file srcK lands on 2048 (one past the end); with k0 clamped
+      // to 2046 the old frac of 2 extrapolated 2·src[2047] − src[2046] —
+      // invented energy, not a measurement.
+      const srcK = Math.min(srcBins - 1, Math.max(0, hz / srcBinHz));
+      const k0 = Math.min(srcBins - 2, Math.floor(srcK));
       const frac = srcK - k0;
       const v = src[k0]! * (1 - frac) + src[k0 + 1]! * frac;
       out[t * nBins + b] = v;
@@ -975,9 +983,36 @@ function decodeBuffer(
   });
 }
 
+/**
+ * Context rate to decode at, given the container's sample-rate hint.
+ *
+ * decodeAudioData resamples to the context rate, so a rate below the
+ * decoder's true output throws away exactly the bandwidth being measured.
+ * HE-AAC (SBR) headers commonly advertise the half-rate core — 22.05 or
+ * 24 kHz — while the decoder outputs 44.1 or 48 kHz; honoring that hint
+ * halves the measured ceiling. So a sub-32 kHz AAC hint is lifted to the
+ * top of its rate family (22.05/11.025 → 44.1, 24/16/12/8 → 48).
+ *
+ * The lift makes the decode rate differ from the container rate, so
+ * analyzeFile passes `rateConfirmed: false, sourceRate: hint` and the source
+ * edge detector checks for a cliff at hint / 2: a genuine low-rate AAC has
+ * one and is graded against its own band, while HE-AAC's SBR content runs
+ * past it and is graded at the full rate. Every other codec decodes at its
+ * own rate — there is no hidden-bandwidth case to recover.
+ */
+export function decodeRateFor(hint: number | null, codec?: string | null): number | null {
+  if (hint == null || !Number.isFinite(hint) || hint <= 0) return null;
+  if (codec && /^AAC\b/i.test(codec) && hint < 32000) {
+    return 44100 % hint === 0 ? 44100 : 48000;
+  }
+  return hint;
+}
+
 export async function decodeNative(
   buffer: ArrayBuffer,
   sampleRateHint: number | null,
+  /** Container codec: lets an HE-AAC core-rate hint decode at full rate. */
+  codec?: string | null,
 ): Promise<AudioBuffer> {
   // decodeAudioData detaches the buffer it is given, so hand it a copy and
   // only copy again if a retry is actually needed.
@@ -990,7 +1025,7 @@ export async function decodeNative(
   // can't be honored and a resample is unavoidable, 48 kHz keeps everything
   // the file had up to 24 kHz, while decoding a wide file at 44.1 kHz would
   // silently discard content above 22 kHz. Upsampling 44.1→48 costs only CPU.
-  const candidates = [sampleRateHint, 48000, 44100].filter(
+  const candidates = [decodeRateFor(sampleRateHint, codec), 48000, 44100].filter(
     (v, i, a): v is number => typeof v === "number" && v >= 8000 && a.indexOf(v) === i,
   );
 
@@ -1325,6 +1360,7 @@ export async function scanExcerpt(
   seekSec: number,
   onProgress?: (status: string, amount: number) => void,
   signal?: AbortSignal,
+  codec?: string | null,
 ): Promise<SpectrogramData> {
   throwIfAborted(signal);
   onProgress?.("Reading", 0.05);
@@ -1374,7 +1410,7 @@ export async function scanExcerpt(
   const bytes = await blob.arrayBuffer();
   throwIfAborted(signal);
   onProgress?.("Decoding", 0.2);
-  const buffer = await decodeNative(bytes, hintRate);
+  const buffer = await decodeNative(bytes, hintRate, codec);
   throwIfAborted(signal);
   if (buffer.length < 256 || buffer.duration < 0.15) {
     throw new Error("That file is too short to scan.");
@@ -1595,7 +1631,7 @@ export async function analyzeFile(
   onProgress?.("Decoding", 0.12);
   let audio: AudioBuffer;
   try {
-    audio = await decodeNative(arrayBuffer, container.sampleRate);
+    audio = await decodeNative(arrayBuffer, container.sampleRate, container.codec);
   } catch {
     throw new Error(decodeErrorMessage(file.name, container.codec));
   }
@@ -1941,21 +1977,34 @@ export function compareQualityMeasurements(
       ? ` File ${worseSlot} has a sharp spectral cutoff. Filtering or encoding can cause this; it does not establish source history.`
       : "";
 
-  const claimed = worse.container.claimedKbps;
   // CAF belongs here with FLAC/WAV: sniff.ts parses it and it is lossless.
-  const losslessWrap = /FLAC|PCM|ALAC|WAV|AIFF|CAF/i.test(worse.container.codec);
-  // A lossless wrapper around band-limited audio is always worth flagging;
-  // a lossy header only when it claims high bitrate for low measured class.
-  const mismatch = losslessWrap
-    ? worse.qualityClass !== "lossless"
-      ? ` File ${worseSlot} is wrapped as ${worse.container.codec} (${Math.round(claimed ?? worse.containerKbps)} kbps), but the audio inside is band-limited.`
-      : ""
-    : claimed &&
-        worse.qualityClass !== "high" &&
-        worse.qualityClass !== "lossless" &&
-        claimed >= 256
+  const isLosslessWrap = (x: ComparisonMetrics) =>
+    /FLAC|PCM|ALAC|WAV|AIFF|CAF/i.test(x.container.codec);
+  // A lossless wrapper around band-limited audio is worth flagging on EITHER
+  // file: a FLAC made from a 320 kbps MP3 can still beat a 128 kbps rip.
+  // Source-limited files are exempt: their ceiling is the music, so calling
+  // them band-limited would accuse a genuine lossless file. The winner also
+  // needs hard evidence (a brickwall, or a ceiling in encoder low-pass
+  // territory) — a steep-but-wide genuine master shouldn't carry the flag.
+  const fakeLossless = (x: ComparisonMetrics, slot: string, strict: boolean): string =>
+    isLosslessWrap(x) &&
+    x.qualityClass !== "lossless" &&
+    !x.sourceLimited &&
+    (!strict || x.rolloff === "brickwall" || x.cutoffHz < 19500)
+      ? ` File ${slot} is wrapped as ${x.container.codec} (${Math.round(x.container.claimedKbps ?? x.containerKbps)} kbps), but the audio inside is band-limited.`
+      : "";
+  const claimed = worse.container.claimedKbps;
+  // A lossy header is flagged only when it claims high bitrate for a low
+  // measured class.
+  const headerMismatch =
+    !isLosslessWrap(worse) &&
+    claimed &&
+    worse.qualityClass !== "high" &&
+    worse.qualityClass !== "lossless" &&
+    claimed >= 256
       ? ` The header reports ${claimed} kbps, while measured bandwidth is limited; this alone cannot establish an earlier encoding bitrate.`
       : "";
+  const mismatch = `${fakeLossless(worse, worseSlot, false)}${headerMismatch}${fakeLossless(better, betterSlot, true)}`;
 
   // With verified alignment, differing lengths are just trims/different
   // masters. the offset is measured and handled, not a same-song doubt.

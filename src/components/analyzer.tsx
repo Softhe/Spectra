@@ -916,6 +916,7 @@ export function Analyzer() {
               setScanStates((st) => ({ ...st, [id]: { busy: true, progress: amount, phase } }));
             },
             controller.signal,
+            a.container.codec,
           ),
         );
         if (controller.signal.aborted || analysesRef.current[id]?.id !== a.id) return;

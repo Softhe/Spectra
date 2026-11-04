@@ -157,7 +157,11 @@ async function openSource(analysis: Analysis, signal?: AbortSignal): Promise<Sli
   if (wav) return new WavPcmSource(blob, wav);
   // Same decode (and fallback-rate) semantics as analyzeFile; sliceMono
   // zeroes any non-finite samples a corrupt decode leaves behind.
-  const buffer = await decodeNative(await blob.arrayBuffer(), analysis.container.sampleRate);
+  const buffer = await decodeNative(
+    await blob.arrayBuffer(),
+    analysis.container.sampleRate,
+    analysis.container.codec,
+  );
   throwIfAborted(signal);
   return bufferSource(buffer);
 }

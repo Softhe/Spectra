@@ -11,8 +11,10 @@ import {
   classifyQuality,
   compareAnalyses,
   decodeErrorMessage,
+  decodeRateFor,
   pickRegions,
   pickRegionsFromBuffer,
+  resampleFramesToDisplay,
   runDsp,
   scoreOf,
 } from "./analyze.ts";
@@ -388,6 +390,76 @@ describe("compareAnalyses", () => {
     assert.equal(c.winner, "a");
     assert.match(c.detail, /CAF .*band-limited/);
   });
+  it("does not accuse a source-limited lossless file of being band-limited", () => {
+    const c = compareAnalyses(
+      mkAnalysis({ id: "A", cutoff: 22039, score: 95 }),
+      mkAnalysis({ id: "B", cutoff: 22039, score: 80, cls: "high", codec: "FLAC", limited: true }),
+    );
+    assert.equal(c.winner, "a");
+    assert.doesNotMatch(c.detail, /band-limited/);
+  });
+  it("flags a fake-lossless WINNER that shows an encoder brickwall", () => {
+    const c = compareAnalyses(
+      mkAnalysis({
+        id: "A",
+        cutoff: 20000,
+        rolloff: "brickwall",
+        score: 80,
+        cls: "high",
+        codec: "FLAC",
+        ckbps: 900,
+      }),
+      mkAnalysis({ id: "B", cutoff: 16000, rolloff: "brickwall", score: 60, cls: "standard" }),
+    );
+    assert.equal(c.winner, "a");
+    assert.match(c.detail, /File A is wrapped as FLAC .*band-limited/);
+  });
+  it("does not flag a steep-but-wide lossless winner", () => {
+    const c = compareAnalyses(
+      mkAnalysis({
+        id: "A",
+        cutoff: 21900,
+        rolloff: "steep",
+        score: 84,
+        cls: "high",
+        codec: "FLAC",
+        ckbps: 824,
+      }),
+      mkAnalysis({ id: "B", cutoff: 16000, rolloff: "brickwall", score: 60, cls: "standard" }),
+    );
+    assert.equal(c.winner, "a");
+    assert.doesNotMatch(c.detail, /File A is wrapped/);
+  });
+});
+
+describe("decodeRateFor", () => {
+  it("lifts sub-32 kHz AAC hints to their SBR output rate", () => {
+    assert.equal(decodeRateFor(22050, "AAC"), 44100);
+    assert.equal(decodeRateFor(24000, "AAC"), 48000); // 44.1 would cut 22.05–24 kHz
+    assert.equal(decodeRateFor(11025, "AAC"), 44100);
+    assert.equal(decodeRateFor(16000, "AAC"), 48000);
+  });
+  it("leaves every other rate and codec at its own rate", () => {
+    assert.equal(decodeRateFor(44100, "AAC"), 44100);
+    assert.equal(decodeRateFor(32000, "AAC"), 32000);
+    assert.equal(decodeRateFor(22050, "FLAC"), 22050);
+    assert.equal(decodeRateFor(24000, "MP3"), 24000);
+    assert.equal(decodeRateFor(22050, "PCM"), 22050);
+    assert.equal(decodeRateFor(22050, null), 22050);
+    assert.equal(decodeRateFor(null, "AAC"), null);
+  });
+});
+
+describe("resampleFramesToDisplay", () => {
+  it("never extrapolates past the last FFT bin on the top row", () => {
+    const frame = new Float32Array(2048).fill(-60);
+    frame[2046] = -20;
+    frame[2047] = -100;
+    const d = resampleFramesToDisplay([frame], 44100, 0, 1);
+    // Old code: 2·(−100) − (−20) = −180 dB of invented energy.
+    assert.equal(d.frames[d.nBins - 1], -100);
+    for (const v of d.frames) assert.ok(v >= -100 && v <= -20, `out of range: ${v}`);
+  });
 });
 
 describe("bitGridCheck", () => {
@@ -693,6 +765,29 @@ describe("runDsp unconfirmed decode rate", () => {
       assert.equal(a.rolloff, "natural", `fade ${f0}`);
       assert.deepEqual(verdict(b), verdict(a), `fade ${f0}`);
     }
+  });
+  // AAC with a sub-32 kHz header rate is decoded at the doubled rate
+  // (decodeRateFor) and analyzed with rateConfirmed: false + sourceRate.
+  const lifted = { rateConfirmed: false, sourceRate: 22050 };
+  it("grades a genuine 22.05 kHz AAC decoded at 44.1 kHz against its own band", async () => {
+    // Plain LC-AAC: the decoder's resampler leaves a cliff at 11.025 kHz.
+    const mono = shapedNoise(44100, 10900);
+    const r = await runDsp(mono, 44100, 0, undefined, undefined, undefined, lifted);
+    const naive = await runDsp(mono, 44100, 0);
+    assert.notEqual(r.rolloff, "brickwall", "source band edge must not read as an encoder cut");
+    assert.equal(naive.rolloff, "brickwall"); // what the lift alone would have reported
+    assert.ok(r.cutoffHz <= 11025, `cutoff ${r.cutoffHz}`);
+  });
+  it("keeps HE-AAC's SBR band when the header advertises the core rate", async () => {
+    // SBR reconstructs up to ~16 kHz: content runs straight past 11.025 kHz.
+    const mono = shapedNoise(44100, 16000);
+    const r = await runDsp(mono, 44100, 0, undefined, undefined, undefined, lifted);
+    assert.ok(r.cutoffHz > 15000, `cutoff ${r.cutoffHz}`);
+    assert.deepEqual(verdict(r), verdict(await runDsp(mono, 44100, 0)));
+  });
+  it("reports no HF slope when Nyquist leaves under a quarter octave above 10 kHz", async () => {
+    const r = await runDsp(shapedNoise(22050, 11000), 22050, 0);
+    assert.equal(r.hfSlope, 0);
   });
   it("keeps the confirmed path identical with or without options", async () => {
     for (const top of [20000, 21900, 22200, 24000]) {
