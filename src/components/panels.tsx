@@ -137,7 +137,12 @@ export function Verdict({
               <button
                 key={slot}
                 type="button"
-                onClick={() => onAbSwitch(slot)}
+                // Re-selecting the playing copy must not restart it (with the
+                // loop on, abSwitch would seek back to the window start). Same
+                // guard as the keyboard path.
+                onClick={() => {
+                  if (!active) onAbSwitch(slot);
+                }}
                 aria-pressed={active}
                 aria-label={
                   active
@@ -312,6 +317,7 @@ function EvidenceStrip({
               <div className="flex items-center justify-between gap-2">
                 <dt className="flex min-w-0 items-center gap-2 text-xs text-muted">
                   <SlotBadge slot={slot} className="size-5 text-[11px]" />
+                  <span className="sr-only">{SLOT_LABELS[slot]}: </span>
                   <span className="truncate" title={x.fileName}>
                     {x.fileName}
                   </span>
