@@ -823,7 +823,7 @@ describe("makeDemoFiles", () => {
     // The demo once ran 6.5 s, below the 12 s matching minimum, so it always
     // landed on "Recording match is uncertain" and never showed a comparison.
     const { makeDemoFiles } = await import("./demo.ts");
-    const { envelopeFromMono, songMatchOf } = await import("./align.ts");
+    const { envelopeFromMono, envelopeFromTaps, songMatchOf } = await import("./align.ts");
     const files = await makeDemoFiles();
     const mono = async (f: File) => {
       const pcm = new Int16Array((await f.arrayBuffer()).slice(44));
@@ -831,12 +831,17 @@ describe("makeDemoFiles", () => {
       for (let i = 0; i < out.length; i++) out[i] = (pcm[2 * i]! + pcm[2 * i + 1]!) / 65536;
       return out;
     };
-    const match = songMatchOf(
-      envelopeFromMono(await mono(files.a), 44100),
-      envelopeFromMono(await mono(files.b), 44100),
-    );
-    assert.equal(match.status, "same");
-    assert.equal(match.lagSec, 0);
+    const [ma, mb] = [await mono(files.a), await mono(files.b)];
+    // The app builds envelopes from strided taps (analyzeFile); the dense
+    // mono path is checked too so either builder keeps the demo matchable.
+    const taps = (m: Float32Array) => envelopeFromTaps(m.length, 44100, (i) => m[i]!);
+    for (const [name, match] of [
+      ["taps", songMatchOf(taps(ma), taps(mb))],
+      ["mono", songMatchOf(envelopeFromMono(ma, 44100), envelopeFromMono(mb, 44100))],
+    ] as const) {
+      assert.equal(match.status, "same", name);
+      assert.equal(match.lagSec, 0, name);
+    }
   });
 });
 

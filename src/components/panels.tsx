@@ -348,7 +348,7 @@ function EvidenceStrip({
       </dl>
       <div className="mt-2 flex justify-between font-mono text-[10px] text-faint" aria-hidden>
         <span>0</span>
-        <span>Nyquist {formatHz(scaleHz)}</span>
+        <span>Scale {formatHz(scaleHz)}</span>
       </div>
     </div>
   );
@@ -713,14 +713,14 @@ export function CompareTable({
             <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
               <span className="inline-flex items-center gap-2">
                 <SlotBadge slot={slotA} className="size-5 text-[11px]" />
-                <span className="hidden sm:inline">{headA}</span>
+                <span className="sr-only sm:not-sr-only">{headA}</span>
                 {winner === "a" && <Trophy aria-label="Preferred copy" className="size-3" />}
               </span>
             </th>
             <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
               <span className="inline-flex items-center gap-2">
                 <SlotBadge slot={slotB} className="size-5 text-[11px]" />
-                <span className="hidden sm:inline">{headB}</span>
+                <span className="sr-only sm:not-sr-only">{headB}</span>
                 {winner === "b" && <Trophy aria-label="Preferred copy" className="size-3" />}
               </span>
             </th>

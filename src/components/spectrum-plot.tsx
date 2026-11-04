@@ -137,8 +137,10 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
         }))
         .filter((t): t is { x: Analysis; col: string; slot: SlotId; index: number } => !!t.x);
 
-      // Two copies with clearly different ceilings: shade the band only the
-      // wider copy carries, so the difference reads at a glance.
+      // Two copies with clearly different ceilings: shade the band between
+      // the two estimates, so the difference reads at a glance. The label
+      // names the estimate, not exclusive content: a ceiling is an energy
+      // threshold, and the narrower copy can still hold quieter sound there.
       if (traces.length === 2) {
         const [lo, hi] = [...traces].sort((p, q) => p.x.cutoffHz - q.x.cutoffHz);
         if (lo && hi && hi.x.cutoffHz - lo.x.cutoffHz >= 1000) {
@@ -149,7 +151,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
           band.addColorStop(1, hexAlpha(hi.col, 0.02));
           ctx.fillStyle = band;
           ctx.fillRect(x0, 0, x1 - x0, h);
-          const text = `only in ${hi.slot.toUpperCase()}`;
+          const text = `above ${lo.slot.toUpperCase()} ceiling`;
           ctx.font = "11px 'IBM Plex Mono', monospace";
           const tw = ctx.measureText(text).width;
           if (x1 - x0 > tw + 12) {
