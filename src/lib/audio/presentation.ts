@@ -6,11 +6,17 @@ export function bitrateDescription(audio: Pick<Analysis, "container">): {
   value: string;
 } {
   const info = audio.container;
-  if (/^(PCM(?: float)?|WAV|AIFF)$/i.test(info.codec)) {
+  if (/^(PCM(?: float)?|WAV|AIFF|CAF)$/i.test(info.codec)) {
+    // Prefer the container-derived byte rate (WAV/RF64 fmt-chunk byteRate):
+    // the recomputed ceil(bitDepth/8) formula overstates nothing but
+    // miscomputes padded storage (20-bit content in 32-bit slots reads
+    // ⅔ of the true rate). The formula is the fallback for containers
+    // (AIFF, CAF lpcm) where only declared fields are known.
     const rate =
-      info.sampleRate && info.channels && info.bitDepth
+      info.claimedKbps ??
+      (info.sampleRate && info.channels && info.bitDepth
         ? (info.sampleRate * info.channels * Math.ceil(info.bitDepth / 8) * 8) / 1000
-        : null;
+        : null);
     return { label: "PCM data rate", value: rate ? `${Math.round(rate)} kbps` : "Not available" };
   }
   if (/FLAC|ALAC/i.test(info.codec))

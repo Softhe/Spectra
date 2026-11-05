@@ -1,7 +1,10 @@
 import { fft, hann } from "./fft";
 
 const SR = 44100;
-const SECONDS = 6.5;
+// 16 s: align.ts calls a shared timeline under MIN_OVERLAP_SEC (12 s)
+// "uncertain" and refuses to rank the pair. The demo must clear that bar so
+// "Load a demo comparison" demonstrates the actual verdict, not the fallback.
+const SECONDS = 16;
 const FFT = 4096;
 // 50% Hann overlap: half the hops of the original 1024 at no audible
 // difference for a demo low-pass (brickwall edge stays at full FFT resolution).

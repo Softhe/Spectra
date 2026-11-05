@@ -41,6 +41,13 @@ const TRACE_CLASS: Record<SlotId, string> = {
   d: "text-trace-d",
 };
 
+const TRACE_DOT: Record<SlotId, string> = {
+  a: "bg-trace-a",
+  b: "bg-trace-b",
+  c: "bg-trace-c",
+  d: "bg-trace-d",
+};
+
 /** Blind-mode display names: the slot letters turn into anonymous clips. */
 export const CLIP_LABELS: Record<SlotId, string> = {
   a: "Clip 1",
@@ -249,7 +256,7 @@ export function FileSlot({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className={cn(
-        "flex min-w-0 flex-col rounded-xl bg-bg-elevated p-4 outline-offset-2 transition-[box-shadow,outline-color] sm:p-5",
+        "flex min-w-0 flex-col rounded-xl bg-bg-elevated p-4 outline-offset-2 shadow-[var(--shadow-border)] transition-[box-shadow,outline-color] sm:p-5",
         outcome === "win" &&
           "shadow-[0_0_0_1.5px_var(--color-win),0_0_44px_-12px_var(--color-win)]",
         outcome === "lose" && "opacity-95 shadow-[0_0_0_1px_var(--color-border)]",
@@ -258,7 +265,16 @@ export function FileSlot({
     >
       <header className="mb-4 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className={cn("font-mono text-xs tracking-widest uppercase", trace)}>{label}</span>
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md bg-bg-subtle px-2 py-0.5",
+              "font-mono text-xs tracking-widest uppercase",
+              trace,
+            )}
+          >
+            <span className={cn("size-1.5 shrink-0 rounded-full", TRACE_DOT[id])} />
+            {label}
+          </span>
           {outcome === "win" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-win px-2 py-0.5 text-[10px] font-semibold tracking-wide text-win-fg uppercase">
               <Trophy className="size-3" />
@@ -312,11 +328,26 @@ export function FileSlot({
             over && "border-accent bg-bg-subtle",
           )}
         >
-          <span className="flex size-11 items-center justify-center rounded-md bg-bg-subtle text-muted">
+          <span
+            className={cn(
+              "flex size-11 items-center justify-center rounded-md bg-bg-subtle text-muted shadow-[var(--shadow-border)] transition-colors duration-150",
+              over && "bg-bg-inset text-fg",
+            )}
+          >
             <Upload className="size-5" />
           </span>
-          <span className="text-sm text-fg">Drop MP3, M4A, WAV, FLAC, OGG, AIFF, or WebM</span>
-          <span className="text-xs text-muted">or choose a file</span>
+          <span className="text-sm text-fg">Drop an audio file here</span>
+          <span className="flex max-w-xs flex-wrap items-center justify-center gap-1">
+            {["MP3", "M4A", "WAV", "FLAC", "OGG", "AIFF", "WebM"].map((fmt) => (
+              <span
+                key={fmt}
+                className="rounded-sm bg-bg-subtle px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-faint"
+              >
+                {fmt}
+              </span>
+            ))}
+          </span>
+          <span className="text-xs text-muted">or click to choose a file</span>
         </button>
       )}
 

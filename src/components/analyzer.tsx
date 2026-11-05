@@ -1,4 +1,4 @@
-import { AudioLines, Eye, EyeOff, Repeat } from "lucide-react";
+import { AudioLines, Eye, EyeOff, Lock, Plus, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
 import {
@@ -34,6 +34,32 @@ const initialSlots: Record<SlotId, SlotState> = {
 
 function analysisOf(s: SlotState | undefined): Analysis | null {
   return s && s.status === "ready" ? s.analysis : null;
+}
+
+/** Wordmark: two overlaid spectra (teal = File A, sand = File B). */
+function SpectrumMark({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 20 16"
+      fill="none"
+      aria-hidden
+      className={className}
+      shapeRendering="crispEdges"
+    >
+      <g fill="var(--color-trace-a)">
+        <rect x="0" y="10" width="2.5" height="6" />
+        <rect x="4" y="5" width="2.5" height="11" />
+        <rect x="8" y="1" width="2.5" height="15" />
+        <rect x="12" y="6" width="2.5" height="10" />
+      </g>
+      <g fill="var(--color-trace-b)" opacity="0.75">
+        <rect x="5" y="12" width="2.5" height="4" />
+        <rect x="9" y="8" width="2.5" height="8" />
+        <rect x="13" y="3" width="2.5" height="13" />
+        <rect x="17" y="9" width="2.5" height="7" />
+      </g>
+    </svg>
+  );
 }
 
 /**
@@ -980,14 +1006,20 @@ export function Analyzer() {
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 sm:py-10">
         <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div className="max-w-xl">
-            <p className="font-mono text-[11px] tracking-[0.22em] text-muted uppercase">Spectra</p>
+            <p className="flex items-center gap-2.5 font-mono text-[11px] tracking-[0.22em] text-muted uppercase">
+              <SpectrumMark className="h-3.5 w-auto" />
+              Spectra
+            </p>
             <h1 className="mt-2 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
               Compare audio copies
             </h1>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
               Compare two copies of the same recording. Spectra aligns shared passages and shows the
-              measured evidence, or explains when no clear preference is possible. Your audio stays
-              in this browser.
+              measured evidence, or explains when no clear preference is possible.
+            </p>
+            <p className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-bg-elevated px-3 py-1 text-xs text-faint shadow-[var(--shadow-border)]">
+              <Lock className="size-3" aria-hidden />
+              Runs entirely in this browser — files are never uploaded
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1040,7 +1072,10 @@ export function Analyzer() {
         )}
 
         {blindHidden && (
-          <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
+          <aside
+            aria-live="polite"
+            className="rounded-xl bg-bg-elevated px-5 py-4 shadow-[var(--shadow-border)] sm:px-6 sm:py-5"
+          >
             <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
               <EyeOff className="size-3.5" />
               Blind test in progress
@@ -1150,9 +1185,12 @@ export function Analyzer() {
 
         {visibleSlotCount < 4 && !blindHidden && (
           <Button
-            variant="outline"
+            variant="ghost"
+            aria-label="Show a third slot"
             onClick={() => setVisibleSlotCount((count) => Math.min(4, count + 1))}
+            className="mx-auto text-muted hover:text-fg"
           >
+            <Plus className="size-4" />
             Add another copy
           </Button>
         )}

@@ -522,6 +522,15 @@ function occupancyCurve(
     }
   }
 
+  // Absolute quiet-floor (dBFS): the per-frame threshold below is RELATIVE
+  // (midPeak − 44), so a digital-silence or DC-offset file — every frame's
+  // mid-band peak ≈ the EPS floor — passes that test in every bin and reads
+  // full-band occupancy 1.0 ("lossless", score 100). Frames this quiet are
+  // fade / silence / offset noise with no occupancy signal; they stop
+  // counting toward the denominator as well.
+  const QUIET_FLOOR_DB = -75;
+  let silentFrames = 0;
+
   for (let i = 0; i < frames.length; i++) {
     if (use && !use[i]) continue;
     const f = frames[i]!;
@@ -529,12 +538,16 @@ function occupancyCurve(
     for (let k = midLo; k <= midHi; k++) {
       if (f[k]! > midPeak) midPeak = f[k]!;
     }
+    if (midPeak < QUIET_FLOOR_DB) {
+      silentFrames++;
+      continue;
+    }
     const thresh = midPeak - 44;
     for (let k = 0; k < nBins; k++) {
       if (f[k]! > thresh) occ[k]! += 1;
     }
   }
-  const inv = 1 / Math.max(1, usedCount);
+  const inv = 1 / Math.max(1, usedCount - silentFrames);
   for (let k = 0; k < nBins; k++) occ[k]! *= inv;
   return occ;
 }
@@ -678,7 +691,11 @@ export async function detectCutoff(
   const scanDrop = (limit: number) => {
     let steepest = 0;
     let dropBin = binAt(8000);
-    for (let k = binAt(7000); k + span < limit; k++) {
+    // Floor at ~3 kHz: starved encodes can low-pass below 7 kHz, and those
+    // cuts must be seen. Natural mid-band dips (vocal band edges) rarely
+    // clear the steepest-drop bar of 0.32 over a 600 Hz span; when they do,
+    // they are band limitations and the brickwall label is honest.
+    for (let k = binAt(3000); k + span < limit; k++) {
       const drop = sm[k]! - sm[k + span]!;
       if (drop > steepest) {
         steepest = drop;
@@ -735,7 +752,8 @@ export async function detectCutoff(
     const meanSm = smooth(meanDb, Math.max(1, Math.round(200 / binHz)));
     const cliffSpan = Math.max(2, Math.round(500 / binHz));
     const recSpan = Math.max(1, Math.round(6000 / binHz));
-    for (let k = binAt(8000); k + cliffSpan < nBins; k++) {
+    // Same ~3 kHz floor as scanDrop: low-bitrate cuts live below 8 kHz.
+    for (let k = binAt(3000); k + cliffSpan < nBins; k++) {
       const top = meanSm[k]!;
       if (top < -55) continue;
       if (top - meanSm[k + cliffSpan]! < 45) continue;

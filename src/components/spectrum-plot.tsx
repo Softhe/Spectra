@@ -201,7 +201,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
   const maxHzLabel = Math.max(22050, ...files.map((f) => f?.spectrogram.maxHz ?? 0));
 
   return (
-    <div className={cn("rounded-xl bg-bg-elevated p-4 sm:p-5", className)}>
+    <div className={cn("rounded-xl bg-bg-elevated p-4 shadow-[var(--shadow-border)] sm:p-5", className)}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-sm font-medium text-fg">Average spectrum</h2>
@@ -228,7 +228,10 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
           )}
         </div>
       </div>
-      <div ref={wrapRef} className="h-40 w-full sm:h-48">
+      <div
+        ref={wrapRef}
+        className="h-44 w-full overflow-hidden rounded-lg bg-bg-inset shadow-[var(--shadow-border)] sm:h-56"
+      >
         <canvas
           ref={canvasRef}
           className="block size-full"

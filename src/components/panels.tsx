@@ -71,7 +71,7 @@ export function Verdict({
   const winnerSlot = comparison.winner === "a" ? slotA : slotB;
   const tone = decided
     ? "bg-bg-elevated shadow-[0_0_0_1.5px_var(--color-win),0_0_60px_-16px_var(--color-win)]"
-    : "bg-bg-elevated";
+    : "bg-bg-elevated shadow-[var(--shadow-border)]";
   const next = abPlaying === slotA ? slotB : abPlaying === slotB ? slotA : slotB;
 
   return (
@@ -518,7 +518,7 @@ export function CompareTable({
   ];
 
   return (
-    <div className="overflow-hidden rounded-xl bg-bg-elevated">
+    <div className="overflow-hidden rounded-xl bg-bg-elevated shadow-[var(--shadow-border)]">
       <table className="w-full table-fixed text-left text-xs">
         <caption className="sr-only">Audio comparison measurements for both files</caption>
         <thead className="border-b border-border font-mono tracking-widest text-faint uppercase">
@@ -526,11 +526,25 @@ export function CompareTable({
             <th scope="col" className="w-[38%] px-4 py-3 font-normal sm:px-5">
               Metric
             </th>
-            <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
+            <th
+              scope="col"
+              className={cn(
+                "py-3 pr-2 font-normal",
+                winner === "a" && "text-win",
+                (winner === "a" || winner === "b") && "bg-win/[0.06]",
+              )}
+            >
               {headA}{" "}
               {winner === "a" && <Trophy aria-label="Preferred copy" className="inline size-3" />}
             </th>
-            <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
+            <th
+              scope="col"
+              className={cn(
+                "py-3 pr-4 font-normal",
+                winner === "b" && "text-win",
+                (winner === "a" || winner === "b") && "bg-win/[0.06]",
+              )}
+            >
               {headB}{" "}
               {winner === "b" && <Trophy aria-label="Preferred copy" className="inline size-3" />}
             </th>
@@ -538,7 +552,7 @@ export function CompareTable({
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.label} className="border-b border-border/70 last:border-b-0">
+            <tr key={row.label} className="border-b border-border/70 transition-colors last:border-b-0 hover:bg-bg-inset/50">
               <th scope="row" className="px-4 py-3 font-normal text-muted sm:px-5">
                 {row.label}
               </th>
@@ -546,6 +560,7 @@ export function CompareTable({
                 className={cn(
                   "py-3 pr-2 font-mono tabular-nums",
                   row.better === "a" ? "text-fg" : "text-muted",
+                  (row.better === "a" || row.better === "b") && "bg-win/[0.05]",
                 )}
               >
                 {row.av}
@@ -554,6 +569,7 @@ export function CompareTable({
                 className={cn(
                   "py-3 pr-4 font-mono tabular-nums",
                   row.better === "b" ? "text-fg" : "text-muted",
+                  (row.better === "a" || row.better === "b") && "bg-win/[0.05]",
                 )}
               >
                 {row.bv}
@@ -576,7 +592,7 @@ function bitDepthRow(x: Analysis): string {
 
 export function HowTo() {
   return (
-    <section className="rounded-xl bg-bg-elevated p-5 sm:p-6">
+    <section className="rounded-xl bg-bg-elevated p-5 shadow-[var(--shadow-border)] sm:p-6">
       <div className="flex items-center gap-2 text-fg">
         <Info />
         <h2 className="text-sm font-medium">How to read this</h2>
