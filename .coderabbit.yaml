@@ -1,0 +1,7 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+reviews:
+  profile: chill
+  pre_merge_checks:
+    # This repo documents intent in inline comments, not per-function docstrings.
+    docstrings:
+      mode: "off"
