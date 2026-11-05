@@ -801,6 +801,25 @@ describe("runDsp unconfirmed decode rate", () => {
       assert.deepEqual(Array.from(b.meanDb), Array.from(a.meanDb));
     }
   });
+
+  describe("grading guards for silence and starved encodes", () => {
+    it("does not grade digital silence as full-band lossless", async () => {
+      const r = await runDsp(new Float32Array(1 << 18), 44100, 0);
+      assert.notEqual(r.qualityClass, "lossless");
+      assert.ok(r.hfOccupancy < 0.05, `hfOccupancy ${r.hfOccupancy}`);
+    });
+    it("does not grade a DC offset as full-band lossless", async () => {
+      const r = await runDsp(new Float32Array(1 << 18).fill(0.001), 44100, 0);
+      assert.notEqual(r.qualityClass, "lossless");
+      assert.ok(r.hfOccupancy < 0.05, `hfOccupancy ${r.hfOccupancy}`);
+    });
+    it("finds a starved encode's low-pass near 5 kHz", async () => {
+      const r = await runDsp(shapedNoise(44100, 5000), 44100, 0);
+      assert.ok(r.cutoffHz > 4300 && r.cutoffHz < 5700, `cutoff ${r.cutoffHz}`);
+      assert.equal(r.rolloff, "brickwall");
+      assert.ok(r.brickwallHz !== null && Math.abs(r.brickwallHz - 5000) < 700);
+    });
+  });
 });
 
 describe("makeDemoFiles", () => {
