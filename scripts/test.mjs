@@ -1,16 +1,42 @@
 // Run both suites without shell globs or platform-specific status syntax.
-import { readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { projectRoot } from "./with-app-env.mjs";
 
 let failed = false;
+
+// Node without TypeScript support accepts --experimental-strip-types but
+// throws ERR_NO_TYPESCRIPT the moment it parses a .ts file. Probe by
+// transpiling a real temp file, then fall back to a transpile loader so the
+// TS suite runs on any Node build.
+function nodeStripsTypescript() {
+  const dir = mkdtempSync(join(tmpdir(), "spectra-ts-probe-"));
+  try {
+    const file = join(dir, "probe.ts");
+    writeFileSync(file, "const n: number = 1;\nconsole.log(n);\n");
+    return (
+      spawnSync(process.execPath, ["--experimental-strip-types", file], {
+        encoding: "utf8",
+      }).status === 0
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const tsOptions = nodeStripsTypescript()
+  ? ["--experimental-strip-types", "--loader", "./scripts/corpus/ts-resolve.mjs"]
+  : [
+      "--loader",
+      "./scripts/corpus/ts-resolve.mjs",
+      "--loader",
+      "./scripts/corpus/ts-transpile.mjs",
+    ];
+
 for (const [directory, suffix, options] of [
   ["scripts", ".test.mjs", []],
-  [
-    "src",
-    ".test.ts",
-    ["--experimental-strip-types", "--loader", "./scripts/corpus/ts-resolve.mjs"],
-  ],
+  ["src", ".test.ts", tsOptions],
 ]) {
   const files = readdirSync(`${projectRoot()}/${directory}`, { recursive: true })
     .filter((file) => file.endsWith(suffix))

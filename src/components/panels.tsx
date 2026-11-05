@@ -734,7 +734,10 @@ export function CompareTable({
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.label} className="border-b border-border/70 last:border-b-0">
+            <tr
+              key={row.label}
+              className="border-b border-border/70 transition-colors last:border-b-0 hover:bg-bg-inset/50"
+            >
               <th scope="row" className="px-4 py-3 font-normal text-muted sm:px-5">
                 {row.label}
               </th>
@@ -788,7 +791,7 @@ function bitDepthRow(x: Analysis): string {
 
 export function HowTo() {
   return (
-    <section className="rounded-xl bg-bg-elevated p-5 sm:p-6">
+    <section className="rounded-xl bg-bg-elevated p-5 shadow-[var(--shadow-border)] sm:p-6">
       <div className="flex items-center gap-2 text-fg">
         <Info />
         <h2 className="text-sm font-medium">How to read this</h2>

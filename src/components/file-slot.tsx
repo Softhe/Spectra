@@ -290,7 +290,7 @@ export function FileSlot({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className={cn(
-        "flex min-w-0 flex-col rounded-xl bg-bg-elevated p-4 outline-offset-2 transition-[box-shadow,outline-color] sm:p-5",
+        "flex min-w-0 flex-col rounded-xl bg-bg-elevated p-4 outline-offset-2 shadow-[var(--shadow-border)] transition-[box-shadow,outline-color] sm:p-5",
         outcome === "win" &&
           "shadow-[0_0_0_1.5px_var(--color-win),0_0_44px_-12px_var(--color-win)]",
         outcome === "lose" && "opacity-95 shadow-[0_0_0_1px_var(--color-border)]",

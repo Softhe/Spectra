@@ -1051,7 +1051,10 @@ export function Analyzer() {
         )}
 
         {blindHidden && (
-          <aside aria-live="polite" className="rounded-xl bg-bg-elevated px-5 py-4 sm:px-6 sm:py-5">
+          <aside
+            aria-live="polite"
+            className="rounded-xl bg-bg-elevated px-5 py-4 shadow-[var(--shadow-border)] sm:px-6 sm:py-5"
+          >
             <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
               <EyeOff className="size-3.5" />
               Blind test in progress

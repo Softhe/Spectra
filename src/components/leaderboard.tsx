@@ -53,7 +53,10 @@ export function Leaderboard({
   }
 
   return (
-    <section className="rounded-xl bg-bg-elevated p-4 sm:p-5" aria-label="Head-to-head ranking">
+    <section
+      className="rounded-xl bg-bg-elevated p-4 shadow-[var(--shadow-border)] sm:p-5"
+      aria-label="Head-to-head ranking"
+    >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h2 className="text-sm font-medium text-fg">Pairwise results</h2>
