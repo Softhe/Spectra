@@ -26,7 +26,7 @@ export async function load(url, context, next) {
     fileName: path,
   });
   return {
-    format: pathname.endsWith(".mts") ? "module" : "module",
+    format: "module",
     source: outputText,
     shortCircuit: true,
   };

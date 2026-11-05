@@ -41,12 +41,46 @@ const TRACE_CLASS: Record<SlotId, string> = {
   d: "text-trace-d",
 };
 
-const TRACE_DOT: Record<SlotId, string> = {
+/** Seek-bar fill per slot (full literals so Tailwind keeps them). */
+const TRACE_BG: Record<SlotId, string> = {
   a: "bg-trace-a",
   b: "bg-trace-b",
   c: "bg-trace-c",
   d: "bg-trace-d",
 };
+
+/** Letter chip in the slot's trace colour: the same key the charts use. */
+const BADGE_CLASS: Record<SlotId, string> = {
+  a: "bg-trace-a/15 text-trace-a ring-trace-a/30",
+  b: "bg-trace-b/15 text-trace-b ring-trace-b/30",
+  c: "bg-trace-c/15 text-trace-c ring-trace-c/30",
+  d: "bg-trace-d/15 text-trace-d ring-trace-d/30",
+};
+
+export function SlotBadge({
+  slot,
+  masked,
+  className,
+}: {
+  slot: SlotId;
+  masked?: boolean;
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "inline-flex size-6 shrink-0 items-center justify-center rounded-md font-mono text-xs font-medium ring-1 ring-inset",
+        masked ? "bg-bg-subtle text-muted ring-border" : BADGE_CLASS[slot],
+        className,
+      )}
+    >
+      {masked ? CLIP_LABELS[slot].slice(-1) : slot.toUpperCase()}
+    </span>
+  );
+}
+
+const FORMAT_CHIPS = ["MP3", "M4A", "WAV", "FLAC", "OGG", "AIFF", "WebM"];
 
 /** Blind-mode display names: the slot letters turn into anonymous clips. */
 export const CLIP_LABELS: Record<SlotId, string> = {
@@ -265,16 +299,8 @@ export function FileSlot({
     >
       <header className="mb-4 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-md bg-bg-subtle px-2 py-0.5",
-              "font-mono text-xs tracking-widest uppercase",
-              trace,
-            )}
-          >
-            <span className={cn("size-1.5 shrink-0 rounded-full", TRACE_DOT[id])} />
-            {label}
-          </span>
+          <SlotBadge slot={id} masked={masked} />
+          <span className={cn("font-mono text-xs tracking-widest uppercase", trace)}>{label}</span>
           {outcome === "win" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-win px-2 py-0.5 text-[10px] font-semibold tracking-wide text-win-fg uppercase">
               <Trophy className="size-3" />
@@ -324,30 +350,37 @@ export function FileSlot({
           type="button"
           onClick={() => inputRef.current?.click()}
           className={cn(
-            "flex min-h-52 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border px-4 text-center transition-colors duration-150",
+            "group flex min-h-52 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border-strong bg-bg-inset/60 px-4 text-center transition-colors duration-150 hover:border-muted hover:bg-bg-subtle/60 focus-visible:outline-2 focus-visible:outline-accent",
             over && "border-accent bg-bg-subtle",
           )}
         >
           <span
             className={cn(
-              "flex size-11 items-center justify-center rounded-md bg-bg-subtle text-muted shadow-[var(--shadow-border)] transition-colors duration-150",
-              over && "bg-bg-inset text-fg",
+              "flex size-12 items-center justify-center rounded-full bg-bg-subtle ring-1 ring-border transition-transform duration-150 group-hover:-translate-y-0.5",
+              trace,
             )}
           >
             <Upload className="size-5" />
           </span>
-          <span className="text-sm text-fg">Drop an audio file here</span>
-          <span className="flex max-w-xs flex-wrap items-center justify-center gap-1">
-            {["MP3", "M4A", "WAV", "FLAC", "OGG", "AIFF", "WebM"].map((fmt) => (
+          <span className="text-sm font-medium text-fg">Drop an audio file here</span>
+          <span className="text-xs text-muted">
+            or{" "}
+            <span className="text-fg underline decoration-border-strong underline-offset-4">
+              browse
+            </span>{" "}
+            your device
+          </span>
+          <span className="mt-1 flex max-w-xs flex-wrap justify-center gap-1" aria-hidden>
+            {FORMAT_CHIPS.map((f) => (
               <span
-                key={fmt}
-                className="rounded-sm bg-bg-subtle px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-faint"
+                key={f}
+                className="rounded bg-bg-subtle px-1.5 py-0.5 font-mono text-[10px] text-faint"
               >
-                {fmt}
+                {f}
               </span>
             ))}
           </span>
-          <span className="text-xs text-muted">or click to choose a file</span>
+          <span className="sr-only">Supported: MP3, M4A, WAV, FLAC, OGG, AIFF, or WebM</span>
         </button>
       )}
 
@@ -460,6 +493,7 @@ export function FileSlot({
             }}
           />
           <SeekBar
+            slot={id}
             label={label}
             position={position}
             duration={mediaDuration ?? state.analysis.durationSec}
@@ -640,6 +674,7 @@ function bitDepthLabel(a: Analysis): string {
 }
 
 function SeekBar({
+  slot,
   label,
   position,
   duration,
@@ -648,6 +683,7 @@ function SeekBar({
 }: {
   /** Blind rounds: copies of one song often differ in length, which would name them. */
   hideTotal?: boolean;
+  slot: SlotId;
   label: string;
   position: number;
   duration: number;
@@ -679,7 +715,7 @@ function SeekBar({
         className="relative flex h-6 flex-1 touch-none items-center disabled:pointer-events-none disabled:opacity-40"
       >
         <Slider.Track className="relative h-1 grow rounded-full bg-bg-subtle">
-          <Slider.Range className="absolute h-full rounded-full bg-trace-a" />
+          <Slider.Range className={cn("absolute h-full rounded-full", TRACE_BG[slot])} />
         </Slider.Track>
         <Slider.Thumb
           className="block size-3.5 rounded-full bg-fg shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"

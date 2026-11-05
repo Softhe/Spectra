@@ -1,7 +1,5 @@
 // Run both suites without shell globs or platform-specific status syntax.
-import { mkdtempSync, readdirSync, writeFileSync as writeSync } from "node:fs";
-
-
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -16,7 +14,7 @@ let failed = false;
 function nodeStripsTypescript() {
   const dir = mkdtempSync(join(tmpdir(), "spectra-ts-probe-"));
   const file = join(dir, "probe.ts");
-  writeSync(file, "const n: number = 1;\nconsole.log(n);\n");
+  writeFileSync(file, "const n: number = 1;\nconsole.log(n);\n");
   return (
     spawnSync(process.execPath, ["--experimental-strip-types", file], {
       encoding: "utf8",

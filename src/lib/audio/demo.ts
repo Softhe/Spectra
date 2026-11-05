@@ -1,10 +1,10 @@
 import { fft, hann } from "./fft";
 
 const SR = 44100;
-// 16 s: align.ts calls a shared timeline under MIN_OVERLAP_SEC (12 s)
-// "uncertain" and refuses to rank the pair. The demo must clear that bar so
-// "Load a demo comparison" demonstrates the actual verdict, not the fallback.
-const SECONDS = 16;
+// Must exceed the recording-match minimum overlap (12 s in align.ts) with
+// margin: a shorter demo can never be verified as the same recording, so it
+// always ended in "Recording match is uncertain" instead of a comparison.
+export const DEMO_SECONDS = 16;
 const FFT = 4096;
 // 50% Hann overlap: half the hops of the original 1024 at no audible
 // difference for a demo low-pass (brickwall edge stays at full FFT resolution).
@@ -39,7 +39,8 @@ function env(t: number, attack: number, decay: number): number {
 
 async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array }> {
   const rand = mulberry32(0x5aba1e);
-  const n = Math.floor(SR * SECONDS);
+  const n = Math.floor(SR * DEMO_SECONDS);
+  let hatTone = 0;
   const left = new Float32Array(n);
   const right = new Float32Array(n);
   let pink = 0;
@@ -71,8 +72,16 @@ async function renderMaster(): Promise<{ left: Float32Array; right: Float32Array
     const white = rand() * 2 - 1;
     pink = 0.97 * pink + 0.03 * white;
     const air = pink * 0.05;
-    const hat = white * env(hatT, 0.001, 28) * (bar < 1 ? 0.38 : 0.22);
-    const ride = white * env(t % 1, 0.002, 8) * 0.07;
+    // Downward tilt (mostly a ~2 kHz one-pole lowpass, a little white), like
+    // real cymbals: still full-band to 22 kHz, but no longer a flat noise
+    // wall that saturates the spectrogram.
+    hatTone = 0.75 * hatTone + 0.25 * white;
+    const bright = 0.15 * white + 0.85 * hatTone;
+    // Accents shift every 4 s so the loudness envelope is not a pure 2 s
+    // loop: recording alignment then has one clear best lag.
+    const accent = Math.floor(t / 4) % 2 === 0 ? 1 : 0.7;
+    const hat = bright * env(hatT, 0.001, 28) * (bar < 1 ? 0.26 : 0.15) * accent;
+    const ride = bright * env(t % 1, 0.002, 8) * 0.05;
 
     const mix = kick + bass + pad + hat + ride + air;
     const spread = pad * 0.15 + hat * 0.2;

@@ -22,6 +22,14 @@ type Props = {
   className?: string;
 };
 
+/** `#rrggbb` → rgba() at `alpha`; other colour syntaxes pass through opaque. */
+function hexAlpha(color: string, alpha: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return color;
+  const n = parseInt(m[1]!, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
 function drawTrace(
   ctx: CanvasRenderingContext2D,
   meanDb: Float32Array,
@@ -106,7 +114,11 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
       ctx.fillStyle = faint;
       ctx.fillText(String(dbMax), -8, 12);
       ctx.fillText(String(dbMin), -8, h - 2);
-      for (const db of [-30, -50, -70]) {
+      // Every 20 dB from the floor up, so a lifted ceiling (loud low end) still
+      // gets gridlines instead of one 50 dB gap at the top.
+      const dbTicks: number[] = [];
+      for (let db = dbMin + 20; db <= dbMax - 15; db += 20) dbTicks.push(db);
+      for (const db of dbTicks) {
         const y = h - ((db - dbMin) / (dbMax - dbMin)) * h;
         ctx.beginPath();
         ctx.moveTo(0, y);
@@ -124,6 +136,50 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
           index: i,
         }))
         .filter((t): t is { x: Analysis; col: string; slot: SlotId; index: number } => !!t.x);
+
+      // Two copies with clearly different ceilings: shade the band between
+      // the two estimates, so the difference reads at a glance. The label
+      // names the estimate, not exclusive content: a ceiling is an energy
+      // threshold, and the narrower copy can still hold quieter sound there.
+      if (traces.length === 2) {
+        const [lo, hi] = [...traces].sort((p, q) => p.x.cutoffHz - q.x.cutoffHz);
+        if (lo && hi && hi.x.cutoffHz - lo.x.cutoffHz >= 1000) {
+          const x0 = (lo.x.cutoffHz / maxHz) * w;
+          const x1 = Math.min(w, (hi.x.cutoffHz / maxHz) * w);
+          const band = ctx.createLinearGradient(0, 0, 0, h);
+          band.addColorStop(0, hexAlpha(hi.col, 0.16));
+          band.addColorStop(1, hexAlpha(hi.col, 0.02));
+          ctx.fillStyle = band;
+          ctx.fillRect(x0, 0, x1 - x0, h);
+          const text = `above ${lo.slot.toUpperCase()} ceiling`;
+          ctx.font = "11px 'IBM Plex Mono', monospace";
+          const tw = ctx.measureText(text).width;
+          if (x1 - x0 > tw + 12) {
+            // Vertically between the two traces across the band, so the label
+            // never sits on either line.
+            const bandMean = (x: Analysis) => {
+              const k0 = Math.max(1, Math.ceil(lo.x.cutoffHz / x.meanDbHzPerBin));
+              const k1 = Math.min(
+                x.meanDb.length - 1,
+                Math.floor(hi.x.cutoffHz / x.meanDbHzPerBin),
+              );
+              let sum = 0;
+              let n = 0;
+              for (let k = k0; k <= k1; k++) {
+                sum += x.meanDb[k]!;
+                n++;
+              }
+              return n ? sum / n : dbMin;
+            };
+            const midDb = (bandMean(hi.x) + bandMean(lo.x)) / 2;
+            const yMid = h - ((midDb - dbMin) / (dbMax - dbMin)) * h;
+            ctx.fillStyle = hexAlpha(hi.col, 0.9);
+            ctx.textAlign = "center";
+            ctx.fillText(text, (x0 + x1) / 2, Math.max(48, Math.min(h - 8, yMid + 4)));
+          }
+          ctx.font = "12px 'IBM Plex Mono', monospace";
+        }
+      }
 
       // Below the ceilings the traces overlap almost exactly; the winner
       // paints last so it is never hidden, over slightly faded losers.
@@ -201,11 +257,16 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
   const maxHzLabel = Math.max(22050, ...files.map((f) => f?.spectrogram.maxHz ?? 0));
 
   return (
-    <div className={cn("rounded-xl bg-bg-elevated p-4 shadow-[var(--shadow-border)] sm:p-5", className)}>
+    <div
+      className={cn(
+        "rounded-xl bg-bg-elevated p-4 shadow-[var(--shadow-border)] sm:p-5",
+        className,
+      )}
+    >
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-sm font-medium text-fg">Average spectrum</h2>
-          <p className="mt-0.5 text-xs text-muted">
+          <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-muted">
             Base-analysis spectrum. Comparison markers may use shared-passage measurements. A cutoff
             does not establish an original bitrate.
           </p>
@@ -228,10 +289,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
           )}
         </div>
       </div>
-      <div
-        ref={wrapRef}
-        className="h-44 w-full overflow-hidden rounded-lg bg-bg-inset shadow-[var(--shadow-border)] sm:h-56"
-      >
+      <div ref={wrapRef} className="h-48 w-full sm:h-56">
         <canvas
           ref={canvasRef}
           className="block size-full"
@@ -247,7 +305,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
         style={{ marginLeft: GUTTER_PX }}
       >
         <span className="absolute left-0">0</span>
-        {[10, 20]
+        {[5, 10, 15, 20]
           .filter((k) => k * 1000 < maxHzLabel)
           .map((k) => (
             <span

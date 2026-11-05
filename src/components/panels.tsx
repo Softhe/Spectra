@@ -1,10 +1,13 @@
 import {
   ArrowRightLeft,
   Check,
+  CircleHelp,
   Copy,
   Info,
   Play,
   Repeat,
+  Scale,
+  TriangleAlert,
   Trophy,
   Volume1,
   Volume2,
@@ -20,7 +23,7 @@ import {
   coverageDescription,
   preferenceDescription,
 } from "@/lib/audio/presentation";
-import { SLOT_LABELS } from "@/components/file-slot";
+import { SLOT_LABELS, SlotBadge } from "@/components/file-slot";
 import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
   channelLabel,
@@ -69,41 +72,106 @@ export function Verdict({
   const [equivalence, setEquivalence] = useState<EquivalenceResult | null>(null);
   const decided = comparison.winner !== "tie";
   const winnerSlot = comparison.winner === "a" ? slotA : slotB;
+  const notComparable = comparison.outcome === "not-comparable";
   const tone = decided
-    ? "bg-bg-elevated shadow-[0_0_0_1.5px_var(--color-win),0_0_60px_-16px_var(--color-win)]"
-    : "bg-bg-elevated shadow-[var(--shadow-border)]";
-  const next = abPlaying === slotA ? slotB : abPlaying === slotB ? slotA : slotB;
+    ? "shadow-[0_0_0_1.5px_var(--color-win),0_0_60px_-16px_var(--color-win)]"
+    : notComparable
+      ? "shadow-[0_0_0_1px_color-mix(in_oklab,var(--color-warn)_45%,transparent)]"
+      : "shadow-[var(--shadow-border)]";
+  const StatusIcon = decided ? Trophy : notComparable ? TriangleAlert : Scale;
+  const statusClass = decided
+    ? "bg-win/15 text-win"
+    : notComparable
+      ? "bg-warn/15 text-warn"
+      : "bg-info/15 text-info";
 
   return (
-    <aside aria-live="polite" className={cn("rounded-xl px-5 py-4 sm:px-6 sm:py-5", tone)}>
-      <p className="flex items-center gap-1.5 font-mono text-[11px] tracking-widest text-muted uppercase">
-        {decided && <Trophy className="size-3.5 text-win" />}
-        {decided
-          ? `Preferred · ${SLOT_LABELS[winnerSlot]} · ${comparison.confidence} evidence`
-          : comparison.outcome === "not-comparable"
-            ? "Not reliably comparable"
-            : "No quality preference"}
-      </p>
-      <h2 className="mt-1 text-xl font-medium tracking-tight text-fg sm:text-2xl">
-        {comparison.headline}
-      </h2>
-      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">{comparison.detail}</p>
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button
-          variant="default"
-          onClick={() => onAbSwitch(next)}
-          className="shadow-[0_0_24px_-6px_var(--color-accent)] hover:shadow-[0_0_32px_-4px_var(--color-accent)]"
-          aria-label={
-            abPlaying
-              ? `Now previewing one copy at the playhead. Switch to the other copy at the same position.`
-              : "Preview A and B back to back at matched loudness"
-          }
+    <aside
+      aria-live="polite"
+      className={cn("relative overflow-hidden rounded-xl bg-bg-elevated px-5 py-5 sm:px-6", tone)}
+    >
+      {decided && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -top-24 -right-16 size-72 rounded-full bg-win/10 blur-3xl"
+        />
+      )}
+      <div className="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem] lg:gap-8">
+        <div className="min-w-0">
+          <p
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-mono text-[11px] tracking-widest uppercase",
+              statusClass,
+            )}
+          >
+            <StatusIcon className="size-3.5" />
+            {decided
+              ? `Preferred · ${SLOT_LABELS[winnerSlot]} · ${comparison.confidence} evidence`
+              : notComparable
+                ? "Not reliably comparable"
+                : "No quality preference"}
+          </p>
+          <h2 className="mt-3 text-xl font-medium tracking-tight text-fg sm:text-2xl">
+            {comparison.headline}
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">{comparison.detail}</p>
+        </div>
+        <EvidenceStrip
+          a={a}
+          b={b}
+          slotA={slotA}
+          slotB={slotB}
+          winner={comparison.winner === "a" || comparison.winner === "b" ? comparison.winner : null}
+        />
+      </div>
+
+      <div className="relative mt-5 flex flex-wrap items-center gap-2 rounded-lg bg-bg-inset p-2 shadow-[var(--shadow-border)]">
+        <div
+          role="group"
+          aria-label="Listen to one copy at the aligned position"
+          className="flex rounded-md bg-bg-subtle p-0.5"
         >
-          {abPlaying ? <ArrowRightLeft className="size-4" /> : <Play className="size-4 ml-0.5" />}
-          {abPlaying ? "Switch now" : "Listen and switch"}
-        </Button>
+          {[slotA, slotB].map((slot) => {
+            const active = abPlaying === slot;
+            return (
+              <button
+                key={slot}
+                type="button"
+                // Re-selecting the playing copy must not restart it (with the
+                // loop on, abSwitch would seek back to the window start). Same
+                // guard as the keyboard path.
+                onClick={() => {
+                  if (!active) onAbSwitch(slot);
+                }}
+                aria-pressed={active}
+                aria-label={
+                  active
+                    ? `Now playing ${SLOT_LABELS[slot]}`
+                    : abPlaying
+                      ? `Switch to ${SLOT_LABELS[slot]} at the same position`
+                      : `Play ${SLOT_LABELS[slot]} at matched loudness`
+                }
+                className={cn(
+                  "inline-flex h-9 items-center gap-2 rounded-[6px] px-3 text-sm font-medium transition-[background-color,color,box-shadow] duration-150",
+                  active
+                    ? "bg-accent text-accent-fg shadow-[0_0_20px_-6px_var(--color-accent)]"
+                    : "text-muted hover:bg-bg-elevated hover:text-fg",
+                )}
+              >
+                {active ? (
+                  <PlayingBars />
+                ) : abPlaying ? (
+                  <ArrowRightLeft className="size-3.5" />
+                ) : (
+                  <Play className="size-3.5" />
+                )}
+                {SLOT_LABELS[slot]}
+              </button>
+            );
+          })}
+        </div>
         <Button
-          variant={loopOn ? "default" : "outline"}
+          variant={loopOn ? "default" : "ghost"}
           size="sm"
           onClick={onToggleLoop}
           aria-pressed={loopOn}
@@ -111,35 +179,47 @@ export function Verdict({
           <Repeat className="size-4" />
           {loopOn ? "5 s loop on" : "5 s loop"}
         </Button>
-        <Button variant="outline" size="sm" onClick={onSwap}>
+        <Button variant="ghost" size="sm" onClick={onSwap}>
           <ArrowRightLeft className="size-4" />
-          Swap A/B
+          Swap {slotA.toUpperCase()}/{slotB.toUpperCase()}
         </Button>
-        <span className="text-xs text-faint">
-          Aligned position and matched RMS level. Press{" "}
-          <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
-            {slotA.toUpperCase()}
-          </kbd>
-          /
-          <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
-            {slotB.toUpperCase()}
-          </kbd>{" "}
-          to switch
-        </span>
-        <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
-        <CopyReport
-          comparison={comparison}
-          a={a}
-          b={b}
-          slotA={slotA}
-          slotB={slotB}
-          equivalence={equivalence}
-        />
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+          <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
+          <CopyReport
+            comparison={comparison}
+            a={a}
+            b={b}
+            slotA={slotA}
+            slotB={slotB}
+            equivalence={equivalence}
+          />
+        </div>
       </div>
-      <p className="mt-3 text-xs text-muted">
-        Recording match: {comparison.identityStatus}. {preferenceDescription(comparison)}
+      <p className="relative mt-2 text-xs text-faint">
+        Aligned position and matched RMS level. Press{" "}
+        <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+          {slotA.toUpperCase()}
+        </kbd>
+        /
+        <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+          {slotB.toUpperCase()}
+        </kbd>{" "}
+        to switch.
       </p>
-      <p className="mt-1 text-xs text-muted">{coverageDescription(comparison.coverage)}</p>
+
+      <ul className="relative mt-4 flex flex-col gap-1.5 text-xs text-muted">
+        <li className="flex gap-2">
+          <CircleHelp className="mt-px size-3.5 shrink-0 text-faint" aria-hidden />
+          <span>
+            Recording match: <span className="text-fg">{comparison.identityStatus}</span>.{" "}
+            {preferenceDescription(comparison)}
+          </span>
+        </li>
+        <li className="flex gap-2">
+          <Info className="mt-px size-3.5 shrink-0 text-faint" aria-hidden />
+          <span>{coverageDescription(comparison.coverage)}</span>
+        </li>
+      </ul>
       {(/FLAC|ALAC/.test(a.container.codec) || /FLAC|ALAC/.test(b.container.codec)) && (
         <p className="mt-2 text-xs text-muted">
           FLAC and ALAC use lossless compression. A smaller file does not imply lower audio quality.
@@ -150,7 +230,9 @@ export function Verdict({
         <AudioEquivalence a={fileA} b={fileB} disabled={analysisBusy} onResult={setEquivalence} />
       )}
       <details className="mt-4">
-        <summary className="cursor-pointer text-xs text-muted">Technical score details</summary>
+        <summary className="cursor-pointer text-xs text-muted hover:text-fg">
+          Technical score details
+        </summary>
         <p className="mt-2 text-xs text-muted">
           Experimental heuristic scores are not percentages of retained fidelity.
         </p>
@@ -174,6 +256,107 @@ export function Verdict({
         </div>
       </details>
     </aside>
+  );
+}
+
+/** Three bouncing bars: "this one is playing" without another icon. */
+function PlayingBars() {
+  return (
+    <span aria-hidden className="flex h-3.5 items-end gap-[2px]">
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="w-[3px] origin-bottom rounded-full bg-current motion-safe:animate-[spectra-eq_0.9s_ease-in-out_infinite]"
+          style={{ height: "100%", animationDelay: `${i * -0.3}s` }}
+        />
+      ))}
+    </span>
+  );
+}
+
+/**
+ * Measured bandwidth for the pair as two bars on one shared scale. These are
+ * measurements, shown for every outcome; only a decided comparison marks a
+ * preferred copy.
+ */
+function EvidenceStrip({
+  a,
+  b,
+  slotA,
+  slotB,
+  winner,
+}: {
+  a: Analysis;
+  b: Analysis;
+  slotA: SlotId;
+  slotB: SlotId;
+  winner: "a" | "b" | null;
+}) {
+  const scaleHz = Math.max(22050, a.nyquistHz, b.nyquistHz);
+  const rows = [
+    { side: "a" as const, slot: slotA, x: a },
+    { side: "b" as const, slot: slotB, x: b },
+  ];
+  const deltaHz = Math.abs(a.cutoffHz - b.cutoffHz);
+  return (
+    <div className="rounded-lg bg-bg-inset p-4 shadow-[var(--shadow-border)]">
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="font-mono text-[11px] tracking-widest text-faint uppercase">
+          Measured bandwidth
+        </p>
+        {deltaHz >= 400 && (
+          <p className="font-mono text-[11px] text-muted tabular-nums">Δ {formatHz(deltaHz)}</p>
+        )}
+      </div>
+      <dl className="mt-3 flex flex-col gap-3">
+        {rows.map(({ side, slot, x }) => {
+          const pct = Math.max(2, Math.min(100, (x.cutoffHz / scaleHz) * 100));
+          const isWinner = winner === side;
+          return (
+            <div key={side}>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="flex min-w-0 items-center gap-2 text-xs text-muted">
+                  <SlotBadge slot={slot} className="size-5 text-[11px]" />
+                  <span className="sr-only">{SLOT_LABELS[slot]}: </span>
+                  <span className="truncate" title={x.fileName}>
+                    {x.fileName}
+                  </span>
+                </dt>
+                <dd
+                  className={cn(
+                    "flex shrink-0 items-center gap-1 font-mono text-sm tabular-nums",
+                    isWinner ? "text-win" : "text-fg",
+                  )}
+                >
+                  {isWinner && <Trophy className="size-3.5" aria-label="Preferred copy" />}
+                  {formatHz(x.cutoffHz)}
+                </dd>
+              </div>
+              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-bg-subtle" aria-hidden>
+                <div
+                  className={cn(
+                    "h-full rounded-full",
+                    slot === "a"
+                      ? "bg-trace-a"
+                      : slot === "b"
+                        ? "bg-trace-b"
+                        : slot === "c"
+                          ? "bg-trace-c"
+                          : "bg-trace-d",
+                    winner && !isWinner && "opacity-60",
+                  )}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </dl>
+      <div className="mt-2 flex justify-between font-mono text-[10px] text-faint" aria-hidden>
+        <span>0</span>
+        <span>Scale {formatHz(scaleHz)}</span>
+      </div>
+    </div>
   );
 }
 
@@ -518,7 +701,14 @@ export function CompareTable({
   ];
 
   return (
-    <div className="overflow-hidden rounded-xl bg-bg-elevated shadow-[var(--shadow-border)]">
+    <div className="overflow-hidden rounded-xl bg-bg-elevated">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-4 pt-4 pb-3 sm:px-5">
+        <h2 className="text-sm font-medium text-fg">Measurements</h2>
+        <p className="flex items-center gap-1.5 text-xs text-faint">
+          <span aria-hidden className="inline-block size-1.5 rounded-full bg-win" />
+          marks the more favorable measurement, not a verdict on its own
+        </p>
+      </div>
       <table className="w-full table-fixed text-left text-xs">
         <caption className="sr-only">Audio comparison measurements for both files</caption>
         <thead className="border-b border-border font-mono tracking-widest text-faint uppercase">
@@ -526,33 +716,28 @@ export function CompareTable({
             <th scope="col" className="w-[38%] px-4 py-3 font-normal sm:px-5">
               Metric
             </th>
-            <th
-              scope="col"
-              className={cn(
-                "py-3 pr-2 font-normal",
-                winner === "a" && "text-win",
-                (winner === "a" || winner === "b") && "bg-win/[0.06]",
-              )}
-            >
-              {headA}{" "}
-              {winner === "a" && <Trophy aria-label="Preferred copy" className="inline size-3" />}
+            <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
+              <span className="inline-flex items-center gap-2">
+                <SlotBadge slot={slotA} className="size-5 text-[11px]" />
+                <span className="sr-only sm:not-sr-only">{headA}</span>
+                {winner === "a" && <Trophy aria-label="Preferred copy" className="size-3" />}
+              </span>
             </th>
-            <th
-              scope="col"
-              className={cn(
-                "py-3 pr-4 font-normal",
-                winner === "b" && "text-win",
-                (winner === "a" || winner === "b") && "bg-win/[0.06]",
-              )}
-            >
-              {headB}{" "}
-              {winner === "b" && <Trophy aria-label="Preferred copy" className="inline size-3" />}
+            <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
+              <span className="inline-flex items-center gap-2">
+                <SlotBadge slot={slotB} className="size-5 text-[11px]" />
+                <span className="sr-only sm:not-sr-only">{headB}</span>
+                {winner === "b" && <Trophy aria-label="Preferred copy" className="size-3" />}
+              </span>
             </th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.label} className="border-b border-border/70 transition-colors last:border-b-0 hover:bg-bg-inset/50">
+            <tr
+              key={row.label}
+              className="border-b border-border/70 transition-colors last:border-b-0 hover:bg-bg-inset/50"
+            >
               <th scope="row" className="px-4 py-3 font-normal text-muted sm:px-5">
                 {row.label}
               </th>
@@ -560,18 +745,18 @@ export function CompareTable({
                 className={cn(
                   "py-3 pr-2 font-mono tabular-nums",
                   row.better === "a" ? "text-fg" : "text-muted",
-                  (row.better === "a" || row.better === "b") && "bg-win/[0.05]",
                 )}
               >
+                <BetterMark show={row.better === "a"} />
                 {row.av}
               </td>
               <td
                 className={cn(
                   "py-3 pr-4 font-mono tabular-nums",
                   row.better === "b" ? "text-fg" : "text-muted",
-                  (row.better === "a" || row.better === "b") && "bg-win/[0.05]",
                 )}
               >
+                <BetterMark show={row.better === "b"} />
                 {row.bv}
               </td>
             </tr>
@@ -579,6 +764,20 @@ export function CompareTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** Small dot beside the more favorable measurement; text says it for screen readers. */
+function BetterMark({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <>
+      <span
+        aria-hidden
+        className="mr-1.5 inline-block size-1.5 -translate-y-px rounded-full bg-win align-middle"
+      />
+      <span className="sr-only">More favorable measurement: </span>
+    </>
   );
 }
 
