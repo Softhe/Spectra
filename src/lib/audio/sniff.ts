@@ -180,13 +180,25 @@ function parseWav(bytes: Uint8Array): ContainerInfo | null {
       const bitDepth = view.getUint16(i + 22, true);
       const claimedKbps = sampleRate > 0 ? Math.round((byteRate * 8) / 1000) : null;
       const audioFormat = view.getUint16(i + 8, true);
+      // WAVE_FORMAT_EXTENSIBLE (0xFFFE): the real format is the first two
+      // bytes of the SubFormat GUID at body offset 24 — the same field
+      // wav-source.ts reads — so IEEE-float files are labeled "PCM float"
+      // and keep their isFloatContainer guard in the verdict pass.
+      let formatCode = audioFormat;
+      if (audioFormat === 0xfffe && i + 8 + 40 <= bytes.length) {
+        formatCode = view.getUint16(i + 32, true);
+      }
       const codec =
-        audioFormat === 1
-          ? "PCM"
-          : audioFormat === 3
-            ? "PCM float"
-            : audioFormat === 0xfffe
-              ? "WAV"
+        audioFormat === 0xfffe
+          ? formatCode === 1
+            ? "PCM"
+            : formatCode === 3
+              ? "PCM float"
+              : "WAV"
+          : audioFormat === 1
+            ? "PCM"
+            : audioFormat === 3
+              ? "PCM float"
               : "WAV";
       return {
         codec,
@@ -744,7 +756,16 @@ function parseCaf(bytes: Uint8Array): ContainerInfo | null {
         // ALAC carries its depth in the format flags (1=16, 2=20, 3=24, 4=32).
         bitDepth = [0, 16, 20, 24, 32][flags] ?? null;
       }
-      const codec = CAF_CODECS[formatId] ?? (formatId.trim().toUpperCase() || "Audio");
+      const codec =
+        formatId === "lpcm"
+          ? // kCAFLinearPCMFormatFlagIsFloat (bit 0): a 32-bit float LPCM
+            // packet must take the "PCM float" label like its WAV sibling,
+            // or the bit-depth probe runs on float samples and can blame a
+            // false "padded" container.
+            flags & 1
+            ? "PCM float"
+            : "CAF"
+          : (CAF_CODECS[formatId] ?? (formatId.trim().toUpperCase() || "Audio"));
       const sampleRate = codec === "Opus" ? 48000 : validRate(view.getFloat64(o, false));
       // LPCM's stored rate comes from the packet layout, so padded samples
       // (24-bit in 4-byte slots) report what is really stored rather than the
