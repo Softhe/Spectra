@@ -1,13 +1,8 @@
 import { AudioLines, Eye, EyeOff, Lock, Plus, Repeat } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, NOT_AUDIO_NOTICE, STOP_EVENT } from "@/components/audio-drop";
-import {
-  FileSlot,
-  SLOT_LABELS,
-  type Outcome,
-  type ScanState,
-  type SlotState,
-} from "@/components/file-slot";
+import { FileSlot, type Outcome, type ScanState, type SlotState } from "@/components/file-slot";
+import { SLOT_LABELS } from "@/components/slot-labels";
 import { CompareTable, HowTo, Verdict, VolumeControl } from "@/components/panels";
 import { Leaderboard } from "@/components/leaderboard";
 import { SpectrumPlot } from "@/components/spectrum-plot";
@@ -983,41 +978,43 @@ export function Analyzer() {
         className="pointer-events-none absolute inset-x-0 top-0 h-80 bg-[radial-gradient(40rem_16rem_at_15%_-10%,color-mix(in_oklab,var(--color-trace-a)_14%,transparent),transparent),radial-gradient(36rem_14rem_at_85%_-20%,color-mix(in_oklab,var(--color-trace-b)_10%,transparent),transparent)]"
       />
       <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 sm:py-10">
-        <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
-          <div className="max-w-xl">
+        <header className="flex flex-col gap-7">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="flex items-center gap-2 font-mono text-[11px] tracking-[0.22em] text-muted uppercase">
               <LogoMark />
               Spectra
             </p>
-            <h1 className="mt-3 text-3xl leading-tight font-medium tracking-tight text-fg sm:text-4xl">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant={blind ? "default" : "outline"}
+                onClick={() => (blind ? setBlind(null) : startBlindRound())}
+                disabled={readySlots.length < 2}
+              >
+                {blind ? <Eye className="size-4" /> : <EyeOff className="size-4" />}
+                {blind ? "Exit blind test" : "Blind test"}
+              </Button>
+              <Button
+                variant={readySlots.length === 0 ? "default" : "outline"}
+                onClick={() => void loadDemo()}
+                disabled={demoBusy || SLOT_KEYS.some((id) => slots[id].status === "loading")}
+              >
+                <AudioLines className="size-4" />
+                {demoBusy ? "Building demo" : "Load a demo comparison"}
+              </Button>
+            </div>
+          </div>
+          <div className="max-w-2xl">
+            <h1 className="text-3xl leading-tight font-medium tracking-tight text-fg sm:text-5xl sm:leading-[1.05]">
               Which copy kept more of the recording?
             </h1>
-            <p className="mt-3 max-w-prose text-sm leading-relaxed text-muted">
+            <p className="mt-4 max-w-prose text-sm leading-relaxed text-muted sm:text-base">
               Compare two copies of the same recording. Spectra aligns shared passages and shows the
               measured evidence, or explains when no clear preference is possible.
             </p>
-            <p className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-bg-elevated px-2.5 py-1 text-xs text-muted shadow-[var(--shadow-border)]">
+            <p className="mt-4 inline-flex items-center gap-1.5 rounded-full bg-bg-elevated px-2.5 py-1 text-xs text-muted shadow-[var(--shadow-border)]">
               <Lock className="size-3" aria-hidden />
               Your audio stays in this browser
             </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant={blind ? "default" : "outline"}
-              onClick={() => (blind ? setBlind(null) : startBlindRound())}
-              disabled={readySlots.length < 2}
-            >
-              {blind ? <Eye className="size-4" /> : <EyeOff className="size-4" />}
-              {blind ? "Exit blind test" : "Blind test"}
-            </Button>
-            <Button
-              variant={readySlots.length === 0 ? "default" : "outline"}
-              onClick={() => void loadDemo()}
-              disabled={demoBusy || SLOT_KEYS.some((id) => slots[id].status === "loading")}
-            >
-              <AudioLines className="size-4" />
-              {demoBusy ? "Building demo" : "Load a demo comparison"}
-            </Button>
           </div>
         </header>
 

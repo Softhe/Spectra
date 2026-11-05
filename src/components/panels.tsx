@@ -23,7 +23,8 @@ import {
   coverageDescription,
   preferenceDescription,
 } from "@/lib/audio/presentation";
-import { SLOT_LABELS, SlotBadge } from "@/components/file-slot";
+import { SlotBadge } from "@/components/file-slot";
+import { SLOT_LABELS } from "@/components/slot-labels";
 import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
   channelLabel,
@@ -129,7 +130,7 @@ export function Verdict({
         <div
           role="group"
           aria-label="Listen to one copy at the aligned position"
-          className="flex rounded-md bg-bg-subtle p-0.5"
+          className="rounded-md bg-bg-subtle p-0.5 shadow-[var(--shadow-border)]"
         >
           {[slotA, slotB].map((slot) => {
             const active = abPlaying === slot;
@@ -183,8 +184,8 @@ export function Verdict({
           <ArrowRightLeft className="size-4" />
           Swap {slotA.toUpperCase()}/{slotB.toUpperCase()}
         </Button>
-        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
-          <VolumeControl volume={volume} onVolumeChange={onVolumeChange} />
+        <div className="flex w-full items-center gap-2 sm:ml-auto sm:w-auto">
+          <VolumeControl volume={volume} onVolumeChange={onVolumeChange} fluid />
           <CopyReport
             comparison={comparison}
             a={a}
@@ -352,9 +353,9 @@ function EvidenceStrip({
           );
         })}
       </dl>
-      <div className="mt-2 flex justify-between font-mono text-[10px] text-faint" aria-hidden>
+      <div className="mt-2 flex justify-between gap-2 font-mono text-[10px] text-faint" aria-hidden>
         <span>0</span>
-        <span>Scale {formatHz(scaleHz)}</span>
+        <span className="whitespace-nowrap tabular-nums">Scale {formatHz(scaleHz)}</span>
       </div>
     </div>
   );
@@ -440,9 +441,12 @@ function CopyReport({
 export function VolumeControl({
   volume,
   onVolumeChange,
+  fluid = false,
 }: {
   volume: number;
   onVolumeChange: (v: number) => void;
+  /** Below `sm`, stretch the slider to fill the row instead of a fixed width. */
+  fluid?: boolean;
 }) {
   const lastAudible = useRef(0.75);
   useEffect(() => {
@@ -452,7 +456,7 @@ export function VolumeControl({
   const Icon = volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className={cn("flex items-center gap-2", fluid && "min-w-0 flex-1 sm:flex-none")}>
       <button
         type="button"
         onClick={() => onVolumeChange(volume === 0 ? lastAudible.current : 0)}
@@ -466,7 +470,10 @@ export function VolumeControl({
         max={1}
         step={0.01}
         onValueChange={([v]) => onVolumeChange(v ?? 1)}
-        className="relative flex h-9 w-32 touch-none items-center sm:w-40"
+        className={cn(
+          "relative flex h-9 touch-none items-center sm:w-40",
+          fluid ? "min-w-16 flex-1 sm:flex-none" : "w-32",
+        )}
         aria-label="Preview volume"
       >
         <Slider.Track className="relative h-1 grow rounded-full bg-bg-subtle">
@@ -713,17 +720,29 @@ export function CompareTable({
         <caption className="sr-only">Audio comparison measurements for both files</caption>
         <thead className="border-b border-border font-mono tracking-widest text-faint uppercase">
           <tr>
-            <th scope="col" className="w-[38%] px-4 py-3 font-normal sm:px-5">
+            <th scope="col" className="w-[38%] px-3 py-3 font-normal sm:px-5">
               Metric
             </th>
-            <th scope="col" className={cn("py-3 font-normal", winner === "a" && "text-win")}>
+            <th
+              scope="col"
+              className={cn(
+                "rounded-t bg-win/[0.04] py-3 font-normal",
+                winner === "a" && "bg-win/[0.07] text-win",
+              )}
+            >
               <span className="inline-flex items-center gap-2">
                 <SlotBadge slot={slotA} className="size-5 text-[11px]" />
                 <span className="sr-only sm:not-sr-only">{headA}</span>
                 {winner === "a" && <Trophy aria-label="Preferred copy" className="size-3" />}
               </span>
             </th>
-            <th scope="col" className={cn("py-3 pr-4 font-normal", winner === "b" && "text-win")}>
+            <th
+              scope="col"
+              className={cn(
+                "rounded-t bg-win/[0.04] py-3 pr-3 font-normal sm:pr-4",
+                winner === "b" && "bg-win/[0.07] text-win",
+              )}
+            >
               <span className="inline-flex items-center gap-2">
                 <SlotBadge slot={slotB} className="size-5 text-[11px]" />
                 <span className="sr-only sm:not-sr-only">{headB}</span>
@@ -738,7 +757,7 @@ export function CompareTable({
               key={row.label}
               className="border-b border-border/70 transition-colors last:border-b-0 hover:bg-bg-inset/50"
             >
-              <th scope="row" className="px-4 py-3 font-normal text-muted sm:px-5">
+              <th scope="row" className="px-3 py-3 font-normal text-muted sm:px-5">
                 {row.label}
               </th>
               <td
