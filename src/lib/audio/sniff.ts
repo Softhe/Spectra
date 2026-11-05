@@ -737,6 +737,7 @@ function parseCaf(bytes: Uint8Array): ContainerInfo | null {
       const formatId = ascii(bytes, o + 8, 4);
       const flags = view.getUint32(o + 12, false);
       const bytesPerPacket = view.getUint32(o + 16, false);
+      const framesPerPacket = view.getUint32(o + 20, false);
       const channels = view.getUint32(o + 24, false);
       let bitDepth: number | null = view.getUint32(o + 28, false);
       if (formatId === "alac") {
@@ -745,12 +746,19 @@ function parseCaf(bytes: Uint8Array): ContainerInfo | null {
       }
       const codec = CAF_CODECS[formatId] ?? (formatId.trim().toUpperCase() || "Audio");
       const sampleRate = codec === "Opus" ? 48000 : validRate(view.getFloat64(o, false));
+      // LPCM's stored rate comes from the packet layout, so padded samples
+      // (24-bit in 4-byte slots) report what is really stored rather than the
+      // packed bit-depth formula's lower figure.
+      const claimedKbps =
+        formatId === "lpcm" && sampleRate && bytesPerPacket > 0 && framesPerPacket > 0
+          ? Math.round((sampleRate * bytesPerPacket * 8) / framesPerPacket / 1000)
+          : null;
       return {
         codec,
         sampleRate,
         channels: channels >= 1 && channels <= 8 ? channels : null,
         bitDepth: bitDepth && bitDepth >= 1 && bitDepth <= 64 ? bitDepth : null,
-        claimedKbps: null,
+        claimedKbps,
         vbr: formatId === "lpcm" ? false : bytesPerPacket === 0,
       };
     }

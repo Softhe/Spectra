@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { sniffContainer } from "./sniff.ts";
+import { bitrateDescription } from "./presentation.ts";
 
 // ── Byte builders ───────────────────────────────────────────────────────────
 
@@ -480,6 +481,15 @@ describe("sniffContainer: chunked formats", () => {
   it("reads CAF desc: lpcm 48 kHz 24-bit stereo", () => {
     const r = sniffContainer(toBuffer(caf(48000, "lpcm", 0xc, 6, 1, 2, 24)), "a.caf", "");
     assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["CAF", 48000, 2, 24]);
+  });
+
+  it("takes the CAF lpcm data rate from the stored packet size", () => {
+    const packed = sniffContainer(toBuffer(caf(48000, "lpcm", 0xc, 6, 1, 2, 24)), "a.caf", "");
+    assert.equal(packed.claimedKbps, 2304);
+    // 24-bit samples in 4-byte slots: 8 bytes per stereo frame, not 6.
+    const padded = sniffContainer(toBuffer(caf(48000, "lpcm", 0xc, 8, 1, 2, 24)), "b.caf", "");
+    assert.equal(padded.claimedKbps, 3072);
+    assert.equal(bitrateDescription({ container: padded }).value, "3072 kbps");
   });
 
   it("labels CAF aac as AAC (not a lossless wrapper)", () => {
