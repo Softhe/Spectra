@@ -442,6 +442,71 @@ describe("sniffContainer: chunked formats", () => {
     assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["PCM", 44100, 2, 16]);
   });
 
+  it("resolves WAVE_FORMAT_EXTENSIBLE's SubFormat: 32-bit float reads PCM float", () => {
+    // 0xFFFE never carries the format itself; the real code is the first
+    // two bytes of the SubFormat GUID (here 3 = IEEE float). sniff must
+    // agree with wav-source.ts on this — otherwise the same file is
+    // "PCM float" on the streaming path and a false padded container on
+    // the decode path.
+    const fmt = [
+      ...le16(0xfffe), // audioFormat: EXTENSIBLE
+      ...le16(2), // channels
+      ...le32(48000),
+      ...le32(384000), // byteRate
+      ...le16(8), // blockAlign
+      ...le16(32), // bits (container)
+      ...le16(22), // cbSize
+      ...le16(32), // validBits
+      ...le32(3), // channelMask: stereo
+      ...le16(3), // SubFormat GUID: real format = 3 (IEEE float)
+      ...le16(0x0000),
+      ...le16(0x0010),
+      ...[0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71],
+    ];
+    const wav = [
+      ...bytesOf("RIFF"),
+      ...le32(36 + fmt.length),
+      ...bytesOf("WAVE"),
+      ...bytesOf("fmt "),
+      ...le32(fmt.length),
+      ...fmt,
+      ...bytesOf("data"),
+      ...le32(0),
+    ];
+    const r = sniffContainer(toBuffer(wav), "f.wav", "audio/wav");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["PCM float", 48000, 2, 32]);
+  });
+
+  it("labels an EXTENSIBLE integer file with the SubFormat GUID's real format", () => {
+    const fmt = [
+      ...le16(0xfffe),
+      ...le16(2),
+      ...le32(44100),
+      ...le32(176400),
+      ...le16(4),
+      ...le16(16),
+      ...le16(22),
+      ...le16(16),
+      ...le32(3),
+      ...le16(1), // SubFormat: 1 = integer PCM
+      ...le16(0x0000),
+      ...le16(0x0010),
+      ...[0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71],
+    ];
+    const wav = [
+      ...bytesOf("RIFF"),
+      ...le32(36 + fmt.length),
+      ...bytesOf("WAVE"),
+      ...bytesOf("fmt "),
+      ...le32(fmt.length),
+      ...fmt,
+      ...bytesOf("data"),
+      ...le32(0),
+    ];
+    const r = sniffContainer(toBuffer(wav), "i.wav", "audio/wav");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["PCM", 44100, 2, 16]);
+  });
+
   it("parses AIFF COMM: 44.1 kHz / 16-bit / stereo", () => {
     const comm = [...u16(2), ...u32(1000), ...u16(16), ...ext80(44100)];
     const r = sniffContainer(toBuffer(aiff("AIFF", comm)), "a.aiff", "audio/aiff");
@@ -496,6 +561,16 @@ describe("sniffContainer: chunked formats", () => {
     const r = sniffContainer(toBuffer(caf(44100, "aac ", 0, 0, 1024, 2, 0)), "a.caf", "");
     assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["AAC", 44100, 2, null]);
     assert.equal(r.vbr, true);
+  });
+
+  it("labels CAF lpcm float with the IsFloat flag as PCM float", () => {
+    // kCAFLinearPCMFormatFlagIsFloat (bit 0) on a 32-bit packet — the same
+    // label the WAV path gives its float sibling, so the bit-depth probe
+    // skips float samples instead of reporting a false padded container.
+    const r = sniffContainer(toBuffer(caf(48000, "lpcm", 1, 8, 1, 2, 32)), "f.caf", "");
+    assert.deepEqual([r.codec, r.channels, r.bitDepth], ["PCM float", 2, 32]);
+    const int = sniffContainer(toBuffer(caf(48000, "lpcm", 0xc, 6, 1, 2, 24)), "i.caf", "");
+    assert.equal(int.codec, "CAF");
   });
 });
 

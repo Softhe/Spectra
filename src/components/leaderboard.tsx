@@ -1,6 +1,7 @@
 import { Headphones } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SLOT_LABELS, SlotBadge } from "@/components/file-slot";
+import { SlotBadge } from "@/components/file-slot";
+import { SLOT_LABELS } from "@/components/slot-labels";
 import { pairComparison } from "@/lib/audio/rank";
 import type { Ranking } from "@/lib/audio/rank";
 import type { Refinement } from "@/lib/audio/refine";

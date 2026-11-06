@@ -17,6 +17,7 @@ import {
 } from "@/lib/audio/format";
 import type { RefinedMetrics } from "@/lib/audio/refine";
 import type { Analysis, SlotId, SpectrogramData } from "@/lib/audio/types";
+import { SLOT_LABELS } from "@/components/slot-labels";
 import { cn } from "@/lib/utils";
 
 export type SlotState =
@@ -26,13 +27,6 @@ export type SlotState =
   | { status: "ready"; analysis: Analysis };
 
 export type Outcome = "win" | "lose" | "tie" | null;
-
-export const SLOT_LABELS: Record<SlotId, string> = {
-  a: "File A",
-  b: "File B",
-  c: "File C",
-  d: "File D",
-};
 
 const TRACE_CLASS: Record<SlotId, string> = {
   a: "text-trace-a",
@@ -55,6 +49,14 @@ const BADGE_CLASS: Record<SlotId, string> = {
   b: "bg-trace-b/15 text-trace-b ring-trace-b/30",
   c: "bg-trace-c/15 text-trace-c ring-trace-c/30",
   d: "bg-trace-d/15 text-trace-d ring-trace-d/30",
+};
+
+/** Idle drop zone dashed border, tinted toward the slot's trace colour. */
+const DROP_BORDER: Record<SlotId, string> = {
+  a: "border-[color-mix(in_oklab,var(--color-trace-a)_38%,var(--color-border-strong))]",
+  b: "border-[color-mix(in_oklab,var(--color-trace-b)_38%,var(--color-border-strong))]",
+  c: "border-[color-mix(in_oklab,var(--color-trace-c)_38%,var(--color-border-strong))]",
+  d: "border-[color-mix(in_oklab,var(--color-trace-d)_38%,var(--color-border-strong))]",
 };
 
 export function SlotBadge({
@@ -83,7 +85,7 @@ export function SlotBadge({
 const FORMAT_CHIPS = ["MP3", "M4A", "WAV", "FLAC", "OGG", "AIFF", "WebM"];
 
 /** Blind-mode display names: the slot letters turn into anonymous clips. */
-export const CLIP_LABELS: Record<SlotId, string> = {
+const CLIP_LABELS: Record<SlotId, string> = {
   a: "Clip 1",
   b: "Clip 2",
   c: "Clip 3",
@@ -350,7 +352,8 @@ export function FileSlot({
           type="button"
           onClick={() => inputRef.current?.click()}
           className={cn(
-            "group flex min-h-52 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border-strong bg-bg-inset/60 px-4 text-center transition-colors duration-150 hover:border-muted hover:bg-bg-subtle/60 focus-visible:outline-2 focus-visible:outline-accent",
+            "group flex min-h-52 flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed bg-bg-inset/60 px-4 text-center transition-colors duration-150 hover:border-muted hover:bg-bg-subtle/60 focus-visible:outline-2 focus-visible:outline-accent",
+            DROP_BORDER[id],
             over && "border-accent bg-bg-subtle",
           )}
         >
