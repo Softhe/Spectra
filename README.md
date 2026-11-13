@@ -56,6 +56,30 @@ node scripts/browser-smoke.mjs http://127.0.0.1:8080/ screenshots/dev.png
 
 The helper checks desktop/mobile rendering, errors, overflow, branding and auth invariants. Visually inspect its screenshots as well. Use a distinct output path and --baseline for built-output comparison.
 
+## Command line and HTTP API
+
+The same analysis, recording match, shared-passage remeasurement, ranking and verdict rules can run without a browser. Requires Node.js 22 or newer, the installed project dependencies, and FFmpeg with ffprobe on `PATH` (or `SPECTRA_FFMPEG` / `SPECTRA_FFPROBE`). FFmpeg replaces the browser decoder, so decoded samples, and therefore borderline results, can differ slightly from the web page.
+
+```sh
+npm run spectra -- compare song.flac song.mp3            # readable summary
+npm run spectra -- compare a.flac b.m4a c.mp3 --json     # full report, 2-4 files
+node scripts/spectra-cli.mjs serve --port 8787           # HTTP API on 127.0.0.1
+curl -F file=@song.flac -F file=@song.mp3 http://127.0.0.1:8787/compare
+curl -F file=@song.flac -F file=@song.mp3 "http://127.0.0.1:8787/compare?format=text"
+```
+
+`compare` exits 0 when it produced a report, 1 when a file could not be read or analyzed, and 2 for usage errors. The report's `recommendation.status` is one of:
+
+- `identical-bytes`: every file has the same SHA-256.
+- `identical-audio`: every file decodes to exactly the same samples; containers or tags differ. Choose by format or metadata, not quality.
+- `preferred`: `recommendation.keep` names the copy that likely preserves more of the recording than every other copy, with the same evidence rules as the web page.
+- `inconclusive`: comparable copies without a clear preference. This does not establish equal fidelity.
+- `not-comparable`: the recording match is different or unverified, so no copy is recommended.
+
+Each pair also reports the byte check, the complete decoded-sample comparison (skip it with `--no-equivalence` or `?equivalence=0`), the recording match and lag, and the web page's headline and detail. Per-file results include container facts, the whole-file measurement, and the shared-passage measurement the verdict used.
+
+The server binds to loopback by default and handles one comparison at a time. Uploads are written to a private temporary directory that is deleted after each request, and reports do not include server paths. Binding to any other address requires a bearer token (`--token` or `SPECTRA_TOKEN`, sent as `Authorization: Bearer …`). Size limits: `--max-file-mb` (default 600), `--max-decoded-mb` per file (default 1024), and `--max-upload-mb` per request (default 1024).
+
 ## Audio support
 
 Drop supported MP3, M4A/AAC, WAV, FLAC, AIFF, OGG/Opus or WebM files into the slots. Support ultimately depends on the browser decoder. ALAC M4A may be unsupported in the browser being used; convert a separate test copy to a supported lossless format when necessary. Decoder failures are reported without a quality verdict.
