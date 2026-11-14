@@ -14,6 +14,7 @@ import { WavPcmSource, wavContainerInfo, wavMetaFromBlob, type WavPcmMeta } from
 import type {
   Analysis,
   Comparison,
+  ContainerInfo,
   QualityClass,
   RolloffKind,
   ScoreParts,
@@ -1653,6 +1654,57 @@ export async function analyzeFile(
   } catch {
     throw new Error(decodeErrorMessage(file.name, container.codec));
   }
+  // The returned Analysis owns this URL; nothing does if analysis fails.
+  const objectUrl = URL.createObjectURL(file);
+  let analysis: Analysis;
+  try {
+    analysis = await analyzeDecodedAudio(
+      audio,
+      {
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+        objectUrl,
+        container,
+        cacheKey: key,
+      },
+      onProgress,
+      signal,
+    );
+  } catch (err) {
+    URL.revokeObjectURL(objectUrl);
+    throw err;
+  }
+  if (key) void cachePut(key, analysis);
+  return analysis;
+}
+
+/** What analyzeDecodedAudio needs to know about the file besides its PCM. */
+export type DecodedFileInfo = {
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  /** Playback/refinement URL. Non-browser callers pass "" and supply their own refinement source. */
+  objectUrl: string;
+  /** sniffContainer's view of the file's header. */
+  container: ContainerInfo;
+  cacheKey: string | null;
+};
+
+/**
+ * Everything analyzeFile does after decoding: measurements, DSP, envelope and
+ * bit-grid checks. `audio` only needs AudioBuffer's read members (length,
+ * duration, sampleRate, numberOfChannels, getChannelData returning live
+ * storage), so the command-line tool can feed PCM decoded outside a browser
+ * through the same code path. Non-finite samples are zeroed in place.
+ */
+export async function analyzeDecodedAudio(
+  audio: AudioBuffer,
+  info: DecodedFileInfo,
+  onProgress?: (phase: string, amount: number) => void,
+  signal?: AbortSignal,
+): Promise<Analysis> {
+  const { container } = info;
   // Only a decode at the container's own rate is native; anything else is a
   // fallback guess and may have resampled the source. When the container
   // did report a rate (its native decode just failed), that rate still pins
@@ -1746,16 +1798,16 @@ export async function analyzeFile(
     !isFloatContainer;
   const effectiveBits = losslessContainer ? effectiveBitDepth(audio) : null;
 
-  const containerKbps = audio.duration > 0 ? (file.size * 8) / audio.duration / 1000 : 0;
+  const containerKbps = audio.duration > 0 ? (info.fileSize * 8) / audio.duration / 1000 : 0;
 
   onProgress?.("Done", 1);
 
-  const analysis: Analysis = {
+  return {
     id: newAnalysisId(),
-    fileName: file.name,
-    fileSize: file.size,
-    mimeType: file.type,
-    objectUrl: URL.createObjectURL(file),
+    fileName: info.fileName,
+    fileSize: info.fileSize,
+    mimeType: info.mimeType,
+    objectUrl: info.objectUrl,
     durationSec: audio.duration,
     sampleRate: audio.sampleRate,
     channels: audio.numberOfChannels,
@@ -1774,7 +1826,7 @@ export async function analyzeFile(
     scoreParts: dsp.scoreParts,
     sourceLimited: dsp.sourceLimited,
     liteAnalysis,
-    cacheKey: key,
+    cacheKey: info.cacheKey,
     decode: { rateConfirmed, sourceRateHint: container.sampleRate },
     envelope: loud.envelope,
     effectiveBits,
@@ -1789,9 +1841,6 @@ export async function analyzeFile(
     meanDbHzPerBin: dsp.meanDbHzPerBin,
     spectrogram: dsp.spectrogram,
   };
-
-  if (key) void cachePut(key, analysis);
-  return analysis;
 }
 
 /**

@@ -147,6 +147,13 @@ function sharedWindows(
     .sort((x, y) => x.start - y.start);
 }
 
+/**
+ * Supplies the audio to re-measure for one analysis. The browser default
+ * re-reads the file behind `objectUrl`; the command-line tool passes a source
+ * over PCM it already decoded.
+ */
+export type OpenSource = (analysis: Analysis, signal?: AbortSignal) => Promise<SliceSource>;
+
 /** Bytes → a slice source: WAV streams frames off disk, anything else decodes. */
 async function openSource(analysis: Analysis, signal?: AbortSignal): Promise<SliceSource> {
   const res = await fetch(analysis.objectUrl);
@@ -171,8 +178,9 @@ async function remeasure(
   windows: Span[],
   offset: number,
   signal?: AbortSignal,
+  open: OpenSource = openSource,
 ): Promise<RefinedMetrics | null> {
-  const source = await openSource(analysis, signal);
+  const source = await open(analysis, signal);
   const sr = source.sampleRate;
   const regions = windows.map((w) => {
     const len = Math.round((w.end - w.start) * sr);
@@ -226,6 +234,7 @@ export async function refineAnalyses(
   alignment: GroupAlignment,
   onProgress?: (phase: string, amount: number) => void,
   signal?: AbortSignal,
+  open: OpenSource = openSource,
 ): Promise<Refinement | null> {
   const ref = analyses.find((x) => x.id === alignment.refId);
   if (!ref?.envelope) return null;
@@ -252,7 +261,7 @@ export async function refineAnalyses(
     throwIfAborted(signal);
     onProgress?.(`re-measuring ${x.fileName}`, 0.05 + (0.9 * i) / group.length);
     try {
-      const metrics = await remeasure(x, windows, alignment.offsetById[x.id] ?? 0, signal);
+      const metrics = await remeasure(x, windows, alignment.offsetById[x.id] ?? 0, signal, open);
       if (metrics)
         refined[x.id] = {
           ...metrics,

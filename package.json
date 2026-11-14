@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "check:auth": "node scripts/check-auth-invariant.mjs",
     "test": "node scripts/test.mjs",
+    "spectra": "node scripts/spectra-cli.mjs",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
