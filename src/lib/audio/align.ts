@@ -7,6 +7,8 @@
 export const ENVELOPE_BLOCK_SEC = 0.125;
 /** dB-safe floor: blocks below this power are silence, excluded from scores. */
 const EPS = 1e-12;
+/** Lag ties (periodic/degenerate envelopes) within this correlation spread resolve to the smallest |lag|. */
+const ALIGN_TIE_EPS = 1e-3;
 
 export type Envelope = {
   /** Seconds per block — identical for every envelope we produce. */
@@ -84,12 +86,28 @@ export function alignEnvelopes(
     Math.ceil(10 / bs),
     Math.floor(0.6 * Math.min(a.power.length, b.power.length)),
   );
-  let bestLag = 0;
-  let best = testLag(a, b, 0, minOverlap).corr;
+  const corr = new Float64Array(2 * range + 1);
+  let max = -Infinity;
   for (let c = -range; c <= range; c++) {
-    if (c === 0) continue;
     const r = testLag(a, b, c, minOverlap).corr;
-    if (r > best) {
+    corr[c + range] = r;
+    if (r > max) max = r;
+  }
+  // Periodic or near-flat envelopes give near-equal correlation PEAKS at
+  // every multiple of the period; a strict argmax would pick whichever won
+  // by float noise, placing a preview seek arbitrarily far from the edit.
+  // Break ties between distinct local maxima (never between neighbours on
+  // one peak's slope, which would bias a genuine lag toward 0) by smallest
+  // |lag|, against the global max so the result is scan-order independent.
+  let bestLag = 0;
+  let best = -Infinity;
+  for (let c = -range; c <= range; c++) {
+    const r = corr[c + range]!;
+    if (r < max - ALIGN_TIE_EPS) continue;
+    const left = c > -range ? corr[c + range - 1]! : -Infinity;
+    const right = c < range ? corr[c + range + 1]! : -Infinity;
+    if (r < left || r < right) continue; // on a slope, not a peak
+    if (best === -Infinity || Math.abs(c) < Math.abs(bestLag)) {
       best = r;
       bestLag = c;
     }
