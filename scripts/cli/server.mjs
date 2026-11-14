@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
+import { isIPv4 } from "node:net";
 import { compareFiles } from "./compare.mjs";
 import { formatSummary } from "./format.mjs";
 import { version } from "./version.mjs";
@@ -15,7 +16,7 @@ import { version } from "./version.mjs";
 const MAX_QUEUE = 4;
 
 function isLoopback(host) {
-  return host === "127.0.0.1" || host === "::1" || host === "localhost" || host.startsWith("127.");
+  return host === "::1" || host === "localhost" || (isIPv4(host) && host.startsWith("127."));
 }
 
 function send(res, status, body, type = "application/json; charset=utf-8") {
@@ -57,11 +58,13 @@ export function serve({ host, port, token, maxUploadBytes, ...limits }) {
     throw new Error("Listening on a non-loopback address requires --token or SPECTRA_TOKEN.");
   }
   let queue = Promise.resolve();
+  // Requests holding a slot: parsing their upload, waiting, or comparing.
   let pending = 0;
 
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", "http://spectra.local");
+    let reserved = false;
     try {
+      const url = new URL(req.url ?? "/", "http://spectra.local");
       if (req.method === "GET" && url.pathname === "/health") {
         return send(res, 200, { ok: true, version: version(), busy: pending > 0 });
       }
@@ -86,7 +89,11 @@ export function serve({ host, port, token, maxUploadBytes, ...limits }) {
       }
       const declared = Number(req.headers["content-length"] ?? 0);
       if (declared > maxUploadBytes) return send(res, 413, { error: "Upload too large." });
+      // Reserve the slot before buffering the upload so concurrent requests
+      // cannot all pass this check and exceed MAX_QUEUE.
       if (pending >= MAX_QUEUE) return send(res, 429, { error: "Busy. Retry shortly." });
+      pending++;
+      reserved = true;
 
       const form = await new Request("http://spectra.local/compare", {
         method: "POST",
@@ -101,7 +108,6 @@ export function serve({ host, port, token, maxUploadBytes, ...limits }) {
         return send(res, 400, { error: "Upload 2 to 4 audio files." });
       }
 
-      pending++;
       const job = queue.then(async () => {
         const dir = await mkdtemp(join(tmpdir(), "spectra-upload-"));
         try {
@@ -122,12 +128,7 @@ export function serve({ host, port, token, maxUploadBytes, ...limits }) {
         }
       });
       queue = job.catch(() => {});
-      let report;
-      try {
-        report = await job;
-      } finally {
-        pending--;
-      }
+      const report = await job;
       return url.searchParams.get("format") === "text"
         ? send(res, 200, formatSummary(report) + "\n", "text/plain; charset=utf-8")
         : send(res, 200, report);
@@ -143,6 +144,8 @@ export function serve({ host, port, token, maxUploadBytes, ...limits }) {
                 : "The comparison failed.",
         });
       }
+    } finally {
+      if (reserved) pending--;
     }
   });
 

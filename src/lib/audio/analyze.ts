@@ -1654,19 +1654,27 @@ export async function analyzeFile(
   } catch {
     throw new Error(decodeErrorMessage(file.name, container.codec));
   }
-  const analysis = await analyzeDecodedAudio(
-    audio,
-    {
-      fileName: file.name,
-      fileSize: file.size,
-      mimeType: file.type,
-      objectUrl: URL.createObjectURL(file),
-      container,
-      cacheKey: key,
-    },
-    onProgress,
-    signal,
-  );
+  // The returned Analysis owns this URL; nothing does if analysis fails.
+  const objectUrl = URL.createObjectURL(file);
+  let analysis: Analysis;
+  try {
+    analysis = await analyzeDecodedAudio(
+      audio,
+      {
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+        objectUrl,
+        container,
+        cacheKey: key,
+      },
+      onProgress,
+      signal,
+    );
+  } catch (err) {
+    URL.revokeObjectURL(objectUrl);
+    throw err;
+  }
   if (key) void cachePut(key, analysis);
   return analysis;
 }

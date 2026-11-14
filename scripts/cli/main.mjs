@@ -53,7 +53,7 @@ function parseArgs(argv) {
         const value = inline ?? argv[++i];
         if (value === undefined) throw new UsageError(`--${name} needs a value.`);
         flags[name] = value;
-      } else if (["json", "no-equivalence", "help"].includes(name)) {
+      } else if (["json", "no-equivalence", "help", "version"].includes(name)) {
         flags[name] = true;
       } else {
         throw new UsageError(`Unknown option --${name}.`);
@@ -93,11 +93,15 @@ export async function main(argv) {
   }
   const { positional, flags } = parsed;
   const [command, ...rest] = positional;
+  if (flags.version) {
+    console.log(version());
+    return 0;
+  }
   if (flags.help || !command || command === "help") {
     console.log(USAGE);
     return command || flags.help ? 0 : 2;
   }
-  if (command === "version" || command === "--version") {
+  if (command === "version") {
     console.log(version());
     return 0;
   }

@@ -134,6 +134,14 @@ function measurement(x: Analysis | RefinedMetrics): Measurement {
   };
 }
 
+function hasNonFinite(audio: AudioBuffer): boolean {
+  for (let c = 0; c < audio.numberOfChannels; c++) {
+    const data = audio.getChannelData(c);
+    for (let i = 0; i < data.length; i++) if (!Number.isFinite(data[i]!)) return true;
+  }
+  return false;
+}
+
 function slotLabel(slot: SlotId | "tie", a: string, b: string): string | null {
   return slot === "a" ? a : slot === "b" ? b : null;
 }
@@ -147,6 +155,10 @@ export async function compareGroup(
   if (inputs.length < 2 || inputs.length > MAX_GROUP_FILES) {
     throw new Error(`Compare between 2 and ${MAX_GROUP_FILES} files.`);
   }
+
+  // Analysis zeroes NaN/±Infinity samples in place, so check for them first:
+  // a decoded-equality verdict on sanitized PCM could call different inputs exact.
+  const hadNonFinite = inputs.map((input) => checkDecodedEquivalence && hasNonFinite(input.audio));
 
   const analyses: Analysis[] = [];
   for (let i = 0; i < inputs.length; i++) {
@@ -207,18 +219,30 @@ export async function compareGroup(
       let decoded: EquivalenceResult | null = null;
       // Only meaningful for native-rate decodes: a resampled decode is not the file's own audio.
       const native = x.decode?.rateConfirmed !== false && y.decode?.rateConfirmed !== false;
-      if (checkDecodedEquivalence && !bytes && native) {
+      if (checkDecodedEquivalence && !bytes && native && (hadNonFinite[i] || hadNonFinite[j])) {
+        decoded = {
+          status: "unavailable",
+          detail:
+            "At least one file decoded to non-finite samples, so exact sample equality cannot be confirmed.",
+          framesCompared: 0,
+          totalFrames: 0,
+        };
+      } else if (checkDecodedEquivalence && !bytes && native) {
         decoded = await compareDecodedSources(
           bufferSource(audioById.get(x.id)!),
           bufferSource(audioById.get(y.id)!),
           undefined,
           signal,
-        ).catch((err: unknown) => ({
-          status: "unavailable" as const,
-          detail: err instanceof Error ? err.message : "The decoded comparison failed.",
-          framesCompared: 0,
-          totalFrames: 0,
-        }));
+        ).catch((err: unknown) => {
+          // Cancellation must stop the comparison, not become an "unavailable" pair.
+          throwIfAborted(signal);
+          return {
+            status: "unavailable" as const,
+            detail: err instanceof Error ? err.message : "The decoded comparison failed.",
+            framesCompared: 0,
+            totalFrames: 0,
+          };
+        });
         // The shared messages are written for the browser; name the decoder generically.
         decoded = {
           ...decoded,
@@ -316,6 +340,20 @@ function recommend(
   }
   const leader = ranking.order[0];
   if (!leader || ranking.outsiders.has(leader)) {
+    // Ranking also marks verified copies as outsiders when their shared-passage
+    // measurement failed; that is a missing measurement, not a different recording.
+    // Any pair that is itself not comparable keeps the stricter verdict below.
+    if (
+      pairs.every((p) => p.outcome !== "not-comparable") &&
+      pairs.some((p) => p.reasons.includes("shared-measurement-unavailable"))
+    ) {
+      return {
+        status: "inconclusive",
+        keep: null,
+        summary:
+          "The copies could not be measured over the same passages, so no copy is recommended. This does not establish equal fidelity.",
+      };
+    }
     return {
       status: "not-comparable",
       keep: null,

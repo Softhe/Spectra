@@ -78,7 +78,7 @@ curl -F file=@song.flac -F file=@song.mp3 "http://127.0.0.1:8787/compare?format=
 
 Each pair also reports the byte check, the complete decoded-sample comparison (skip it with `--no-equivalence` or `?equivalence=0`), the recording match and lag, and the web page's headline and detail. Per-file results include container facts, the whole-file measurement, and the shared-passage measurement the verdict used.
 
-The server binds to loopback by default and handles one comparison at a time. Uploads are written to a private temporary directory that is deleted after each request, and reports do not include server paths. Binding to any other address requires a bearer token (`--token` or `SPECTRA_TOKEN`, sent as `Authorization: Bearer …`). Size limits: `--max-file-mb` (default 600), `--max-decoded-mb` per file (default 1024), and `--max-upload-mb` per request (default 1024).
+The server binds to loopback by default and handles one comparison at a time. Uploads are written to a private temporary directory that is deleted after each request, and reports do not include server paths. Binding to any other address requires a bearer token (`--token` or `SPECTRA_TOKEN`, sent as `Authorization: Bearer …`). Size limits: `--max-file-mb` (default 600), `--max-decoded-mb` per file (default 1024), and `--max-upload-mb` per request (default 1024). Each decode is stopped after 5 minutes. FFmpeg may only read local files in common audio containers, so playlist or concat inputs (HLS, ffconcat) are refused.
 
 ## Audio support
 

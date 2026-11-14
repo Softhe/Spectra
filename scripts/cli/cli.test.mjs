@@ -2,7 +2,8 @@
 // Needs FFmpeg with libmp3lame; skipped when it is unavailable.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,6 +95,18 @@ describe("spectra CLI", { skip: !hasFfmpeg && "FFmpeg with libmp3lame not found"
     const missing = cli("compare", file("song.flac"), file("missing.flac"));
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /missing\.flac/);
+    for (const args of [["--version"], ["version"]]) {
+      const v = cli(...args);
+      assert.equal(v.code, 0, v.stderr);
+      assert.match(v.stdout, /\d+\.\d+/);
+    }
+  });
+
+  it("refuses playlist-style inputs that would make FFmpeg open other files", () => {
+    writeFileSync(file("list.ffconcat"), "ffconcat version 1.0\nfile song.flac\n");
+    const r = cli("compare", file("song.flac"), file("list.ffconcat"));
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /list\.ffconcat|whitelist|Invalid/);
   });
 
   it("serves comparisons over HTTP and enforces the bearer token", async () => {
@@ -149,18 +162,34 @@ describe("spectra CLI", { skip: !hasFfmpeg && "FFmpeg with libmp3lame not found"
         headers: { authorization: "Bearer t0ken" },
       });
       assert.equal(bad.status, 400);
+
+      // A malformed request target gets a 400 and the server keeps running.
+      const raw = await new Promise((resolve, reject) => {
+        const sock = connect(port, "127.0.0.1", () =>
+          sock.end("GET //[/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        );
+        let out = "";
+        sock.on("data", (d) => (out += d));
+        sock.on("end", () => resolve(out));
+        sock.on("error", reject);
+      });
+      assert.match(raw, /^HTTP\/1\.1 400/);
+      assert.equal((await fetch(`${base}/health`).then((r) => r.json())).ok, true);
     } finally {
       server.kill();
     }
   });
 
   it("refuses to listen beyond loopback without a token", () => {
-    const r = spawnSync(process.execPath, [CLI, "serve", "--host", "0.0.0.0", "--port", "0"], {
-      encoding: "utf8",
-      cwd: ROOT,
-      env: { ...process.env, SPECTRA_TOKEN: "" },
-    });
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /requires --token/);
+    // A DNS name that merely starts with "127." is not a loopback literal.
+    for (const host of ["0.0.0.0", "127.example.invalid"]) {
+      const r = spawnSync(process.execPath, [CLI, "serve", "--host", host, "--port", "0"], {
+        encoding: "utf8",
+        cwd: ROOT,
+        env: { ...process.env, SPECTRA_TOKEN: "" },
+      });
+      assert.equal(r.status, 1, host);
+      assert.match(r.stderr, /requires --token/);
+    }
   });
 });

@@ -106,6 +106,47 @@ describe("headless group comparison", () => {
     assert.ok(report.files.every((f) => f.unranked && f.rank === null));
   });
 
+  it("does not call samples exact when one input had non-finite values", async () => {
+    const pcm = render(12, 7, 0.31);
+    const withNaN = copy(pcm);
+    withNaN[0]![1000] = Number.NaN;
+    pcm[0]![1000] = 0;
+    const report = await compareGroup([
+      input("a.flac", pcm, "hash-a"),
+      input("b.flac", withNaN, "hash-b"),
+    ]);
+    assert.equal(report.pairs[0]!.identity.decoded?.status, "unavailable");
+    assert.match(report.pairs[0]!.identity.decoded!.detail, /non-finite/);
+    assert.notEqual(report.recommendation.status, "identical-audio");
+  });
+
+  it("reports a failed shared measurement as inconclusive, not a different recording", async () => {
+    const pcm = render(12, 7, 0.31);
+    let refining = false;
+    const failing = (i: GroupInput): GroupInput => {
+      const real = i.audio;
+      const audio = Object.create(real) as AudioBuffer;
+      audio.getChannelData = (c: number) => {
+        if (refining) throw new Error("source unavailable");
+        return real.getChannelData(c);
+      };
+      for (const k of ["sampleRate", "length", "numberOfChannels", "duration"] as const)
+        Object.defineProperty(audio, k, { value: real[k] });
+      return { ...i, audio };
+    };
+    const report = await compareGroup(
+      [failing(input("a.flac", pcm, "hash-a")), failing(input("b.flac", copy(pcm), "hash-b"))],
+      {
+        onProgress: (phase) => {
+          if (phase.startsWith("refine")) refining = true;
+        },
+      },
+    );
+    assert.ok(report.pairs[0]!.reasons.includes("shared-measurement-unavailable"));
+    assert.equal(report.recommendation.status, "inconclusive");
+    assert.equal(report.recommendation.keep, null);
+  });
+
   it("skips the decoded-sample check when asked", async () => {
     const pcm = render(12, 7, 0.31);
     const report = await compareGroup(

@@ -16,25 +16,53 @@ export const DEFAULT_MAX_FILE_BYTES = 600 * MIB;
 /** Decoded float32 PCM ceiling per file (about 45 min of 48 kHz stereo). */
 export const DEFAULT_MAX_DECODED_BYTES = 1024 * MIB;
 
+/** Wall-clock ceiling for one decode, so a stalled FFmpeg cannot hold the server queue. */
+export const DEFAULT_DECODE_TIMEOUT_MS = 5 * 60 * 1000;
+const PROBE_TIMEOUT_MS = 60 * 1000;
+
 const FFMPEG = process.env.SPECTRA_FFMPEG || "ffmpeg";
 const FFPROBE = process.env.SPECTRA_FFPROBE || "ffprobe";
 
-function run(cmd, args, { collect = true } = {}) {
+// Inputs may be untrusted uploads. Allow only audio container demuxers and the
+// local file protocol, so playlist- or concat-style inputs (HLS, ffconcat, ...)
+// cannot make FFmpeg open other local files or network URLs.
+const INPUT_GUARD = [
+  "-protocol_whitelist",
+  "file",
+  "-format_whitelist",
+  "flac,mp3,wav,w64,aiff,ogg,matroska,mov,aac,asf,caf,wv,ape,dsf,tta,mpc,mpc8,ac3,eac3,dts,truehd,amr,au",
+];
+
+/**
+ * Resolve with `child`'s exit code once it closes. Reject if it cannot start,
+ * or kill it and reject if it outlives `timeoutMs`.
+ */
+function settle(child, cmd, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-    const out = [];
-    let err = "";
-    child.stdout.on("data", (d) => collect && out.push(d));
-    child.stderr.on("data", (d) => (err = (err + d).slice(-4000)));
-    child.on("error", (e) =>
-      reject(e.code === "ENOENT" ? new Error(`${cmd} was not found. Install FFmpeg.`) : e),
-    );
-    child.on("close", (code) =>
-      code === 0
-        ? resolve(Buffer.concat(out))
-        : reject(new Error(`${cmd} exited with code ${code}: ${err.trim()}`)),
-    );
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${cmd} did not finish within ${Math.round(timeoutMs / 1000)} s.`));
+    }, timeoutMs);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e.code === "ENOENT" ? new Error(`${cmd} was not found. Install FFmpeg.`) : e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
   });
+}
+
+async function run(cmd, args, timeoutMs = PROBE_TIMEOUT_MS) {
+  const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const out = [];
+  let err = "";
+  child.stdout.on("data", (d) => out.push(d));
+  child.stderr.on("data", (d) => (err = (err + d).slice(-4000)));
+  const code = await settle(child, cmd, timeoutMs);
+  if (code !== 0) throw new Error(`${cmd} exited with code ${code}: ${err.trim()}`);
+  return Buffer.concat(out);
 }
 
 export async function decoderVersion() {
@@ -46,6 +74,7 @@ async function probe(path) {
   const out = await run(FFPROBE, [
     "-v",
     "error",
+    ...INPUT_GUARD,
     "-select_streams",
     "a:0",
     "-show_entries",
@@ -74,7 +103,7 @@ export function pcmAudioBuffer(channels, sampleRate) {
   };
 }
 
-async function decodePcm(path, rate, channels, maxDecodedBytes) {
+async function decodePcm(path, rate, channels, maxDecodedBytes, timeoutMs) {
   const child = spawn(
     FFMPEG,
     [
@@ -82,6 +111,7 @@ async function decodePcm(path, rate, channels, maxDecodedBytes) {
       "-v",
       "error",
       "-nostdin",
+      ...INPUT_GUARD,
       "-i",
       path,
       "-map",
@@ -113,12 +143,7 @@ async function decodePcm(path, rate, channels, maxDecodedBytes) {
     chunks.push(d);
   });
   child.stderr.on("data", (d) => (err = (err + d).slice(-4000)));
-  const code = await new Promise((resolve, reject) => {
-    child.on("error", (e) =>
-      reject(e.code === "ENOENT" ? new Error(`${FFMPEG} was not found. Install FFmpeg.`) : e),
-    );
-    child.on("close", resolve);
-  });
+  const code = await settle(child, FFMPEG, timeoutMs);
   if (tooLarge) {
     throw new Error(
       `The decoded audio exceeds ${Math.round(maxDecodedBytes / MIB)} MiB. Use a shorter file or raise --max-decoded-mb.`,
@@ -164,6 +189,7 @@ export async function loadAudioFile(path, options = {}) {
     displayName = basename(path),
     maxFileBytes = DEFAULT_MAX_FILE_BYTES,
     maxDecodedBytes = DEFAULT_MAX_DECODED_BYTES,
+    decodeTimeoutMs = DEFAULT_DECODE_TIMEOUT_MS,
   } = options;
   const info = await stat(path);
   if (!info.isFile()) throw new Error(`${displayName} is not a regular file.`);
@@ -188,7 +214,7 @@ export async function loadAudioFile(path, options = {}) {
   const [sha256, probed] = await Promise.all([sha256File(path), probe(path)]);
   // analyzeFile decodes at the sniffed rate; an unknown rate falls back to 48 kHz.
   const rate = decodeRateFor(container.sampleRate, container.codec) ?? 48000;
-  const planar = await decodePcm(path, rate, probed.channels, maxDecodedBytes);
+  const planar = await decodePcm(path, rate, probed.channels, maxDecodedBytes, decodeTimeoutMs);
   return {
     sha256,
     audio: pcmAudioBuffer(planar, rate),
