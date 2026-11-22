@@ -113,6 +113,13 @@ type Props = {
   /** A completed pinned excerpt replaces the default spectrogram picture. */
   override?: SpectrogramData | null;
   onResetOverride?: () => void;
+  /** Shared spectrogram frequency axis across slots (Hz). */
+  displayMaxHz?: number;
+  /**
+   * Files beyond the first in a multi-file pick or drop on this slot; the
+   * analyzer spreads them over the other empty slots.
+   */
+  onExtraFiles?: (files: File[]) => void;
 };
 
 const LOOP_WRAP_BACK = 0.75; // s. tolerate a small overshoot before re-wrapping
@@ -139,6 +146,8 @@ export function FileSlot({
   onScan,
   override,
   onResetOverride,
+  displayMaxHz,
+  onExtraFiles,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -176,8 +185,29 @@ export function FileSlot({
   }, [readyId]);
 
   function pick(files: FileList | File[] | null) {
-    const file = files?.[0];
+    const audio = audioFilesFrom(files);
+    const [file, ...extra] = audio;
     if (file) onFile(file);
+    else if (files && files.length > 0) onRejectedDrop();
+    if (extra.length > 0) onExtraFiles?.(extra);
+  }
+
+  function seekTo(t: number, play = false) {
+    const el = audioRef.current;
+    if (!el || !Number.isFinite(t)) return;
+    try {
+      el.currentTime = t;
+    } catch {
+      // Not yet seekable.
+    }
+    setPosition(t);
+    if (play && el.paused) {
+      setPlayError(null);
+      el.play().catch(() => {
+        setPlaying(false);
+        setPlayError("Preview could not start. Retry.");
+      });
+    }
   }
 
   // The whole card is a drop target in every state, so a drop always lands
@@ -228,9 +258,7 @@ export function FileSlot({
     if (!dragHasFiles(e)) return;
     e.preventDefault();
     e.stopPropagation();
-    const file = audioFilesFrom(e.dataTransfer.files)[0];
-    if (file) onFile(file);
-    else onRejectedDrop();
+    pick(e.dataTransfer.files);
   }
 
   function togglePlay() {
@@ -501,17 +529,7 @@ export function FileSlot({
             position={position}
             duration={mediaDuration ?? state.analysis.durationSec}
             hideTotal={masked}
-            onSeek={(t) => {
-              const el = audioRef.current;
-              if (el && Number.isFinite(t)) {
-                try {
-                  el.currentTime = t;
-                } catch {
-                  // Not yet seekable.
-                }
-                setPosition(t);
-              }
-            }}
+            onSeek={(t) => seekTo(t)}
           />
           {playError && (
             <p role="alert" className="text-xs text-loss">
@@ -553,6 +571,9 @@ export function FileSlot({
                   analysis={state.analysis}
                   override={override}
                   onResetOverride={onResetOverride}
+                  displayMaxHz={displayMaxHz}
+                  playheadSec={position}
+                  onSeek={(t) => seekTo(t, true)}
                 />
               )}
               {onScan && (
@@ -624,6 +645,7 @@ export function FileSlot({
                   <Stat
                     label="Sample rate"
                     value={`${formatSampleRate(state.analysis.sampleRate)} · ${channelLabel(state.analysis.channels)}`}
+                    note={`Format limit ${formatHz(state.analysis.nyquistHz)}`}
                   />
                   <Stat
                     label="Peak / RMS"
@@ -641,6 +663,8 @@ export function FileSlot({
         ref={inputRef}
         type="file"
         accept={ACCEPT}
+        // Several files at once fill this slot and then the other empty ones.
+        multiple
         className="sr-only"
         // Opened by the slot's own buttons; as a tab stop it is an invisible,
         // unlabeled focus target.

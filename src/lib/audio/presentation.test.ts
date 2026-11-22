@@ -46,3 +46,40 @@ it("distinguishes analyzed duration from overlap", () => {
     "Compared 4 shared passages totaling 16 seconds. The files overlap for 1:45.5.",
   );
 });
+
+it("explains up front why the identical-audio check cannot match", async () => {
+  const { equivalencePrecheck, formatDescription } = await import("./presentation.ts");
+  const file = (codec: string, sampleRate = 44100, channels = 2) => ({
+    container: { ...container, codec, sampleRate, channels },
+    sampleRate,
+    channels,
+  });
+  const labels = { a: "A", b: "B" };
+  assert.equal(equivalencePrecheck(file("FLAC"), file("PCM"), labels), null);
+  assert.match(
+    equivalencePrecheck(file("FLAC"), file("MP3"), labels) ?? "",
+    /File B \(MP3\) uses lossy coding/,
+  );
+  assert.match(
+    equivalencePrecheck(file("AAC"), file("Opus"), labels) ?? "",
+    /File A \(AAC\) and File B \(Opus\) use lossy/,
+  );
+  assert.match(
+    equivalencePrecheck(file("FLAC", 96000), file("FLAC"), labels) ?? "",
+    /different sample rates \(96 kHz and 44\.1 kHz\)/,
+  );
+  assert.match(
+    equivalencePrecheck(file("PCM", 44100, 1), file("PCM"), labels) ?? "",
+    /different channel layouts \(mono and stereo\)/,
+  );
+  assert.match(equivalencePrecheck(file("AIFF"), file("FLAC"), labels) ?? "", /AIFF files are not/);
+  assert.equal(formatDescription(file("FLAC")), "FLAC · lossless");
+  assert.equal(formatDescription(file("MP3")), "MP3 · lossy");
+});
+
+it("spaces frequency ticks for CD and hi-res axes", async () => {
+  const { frequencyTicksKHz } = await import("./format.ts");
+  assert.deepEqual(frequencyTicksKHz(22050), [5, 10, 15, 20]);
+  assert.deepEqual(frequencyTicksKHz(24000), [5, 10, 15, 20]);
+  assert.deepEqual(frequencyTicksKHz(48000), [10, 20, 30, 40]);
+});

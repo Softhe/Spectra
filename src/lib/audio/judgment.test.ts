@@ -1076,3 +1076,74 @@ describe("pickRegionsFromBuffer", () => {
     assert.deepEqual(pickRegionsFromBuffer(fakeBuffer([mono])), pickRegions(mono, sr));
   });
 });
+
+describe("cross-format verdict notes", () => {
+  const hires = (o: Partial<Analysis> = {}): Analysis => ({
+    ...mkAnalysis({ id: "HR", cutoff: 38000, codec: "FLAC", cls: "lossless", score: 90 }),
+    sampleRate: 96000,
+    nyquistHz: 48000,
+    container: {
+      codec: "FLAC",
+      sampleRate: 96000,
+      channels: 2,
+      bitDepth: 24,
+      claimedKbps: null,
+      vbr: null,
+    },
+    ...o,
+  });
+  const cd = (o: Partial<Analysis> = {}): Analysis => ({
+    ...mkAnalysis({ id: "CD", cutoff: 21800, codec: "FLAC", cls: "lossless", score: 90 }),
+    ...o,
+  });
+
+  it("says a CD copy at its format limit lost nothing it could hold", () => {
+    const c = compareAnalyses(hires(), cd());
+    assert.equal(c.winner, "a");
+    assert.match(c.detail, /File B reaches the limit of its format: a 44\.1 kHz file/);
+    assert.match(c.detail, /reflects the sample rate rather than lost content/);
+  });
+  it("flags a lead that lies entirely above hearing", () => {
+    const c = compareAnalyses(hires(), cd());
+    assert.match(c.detail, /File A lies above 21\.8 kHz, beyond the range most adults hear/);
+  });
+  it("does not add format-limit or hearing notes to an audible bandwidth win", () => {
+    const c = compareAnalyses(
+      cd(),
+      mkAnalysis({ id: "MP3", cutoff: 16000, rolloff: "brickwall", score: 70, cls: "standard" }),
+    );
+    assert.equal(c.winner, "a");
+    assert.doesNotMatch(c.detail, /limit of its format|beyond the range most adults hear/);
+  });
+  it("names a likely upsampled hi-res file in ties too, without the generic band-limit line", () => {
+    const up = hires({ cutoffHz: 21500, rolloff: "brickwall", qualityClass: "high" });
+    const tie = compareAnalyses(up, cd({ cutoffHz: 21600 }));
+    assert.equal(tie.winner, "tie");
+    assert.match(tie.detail, /File A is a 96 kHz file, but its content ends near 21\.5 kHz/);
+    assert.match(tie.detail, /consistent with a 44\.1 kHz source/);
+    const lost = compareAnalyses(
+      up,
+      mkAnalysis({ id: "MP3", cutoff: 16000, rolloff: "brickwall", score: 70, cls: "standard" }),
+    );
+    assert.equal(lost.winner, "a");
+    assert.match(lost.detail, /converted to a higher sample rate/);
+    assert.doesNotMatch(lost.detail, /File A is wrapped as FLAC/);
+  });
+  it("never calls a natural hi-res fade an upsample", () => {
+    const c = compareAnalyses(hires({ cutoffHz: 23000, rolloff: "natural" }), cd());
+    assert.doesNotMatch(c.detail, /converted to a higher sample rate/);
+  });
+  it("notes a mono copy beside a stereo copy", () => {
+    const c = compareAnalyses(cd(), cd({ id: "M", channels: 1, stereoWidth: 0 }));
+    assert.equal(c.winner, "tie");
+    assert.match(c.detail, /File B is mono and File A has 2 channels/);
+  });
+  it("notes mono audio stored as stereo", () => {
+    const c = compareAnalyses(cd({ stereoWidth: 0 }), cd({ id: "S", stereoWidth: 0.2 }));
+    assert.match(c.detail, /File A has identical left and right channels/);
+  });
+  it("adds no channel note when the layouts agree", () => {
+    const c = compareAnalyses(cd(), cd({ id: "S2" }));
+    assert.doesNotMatch(c.detail, /mono|identical left and right/);
+  });
+});

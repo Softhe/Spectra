@@ -196,6 +196,37 @@ export function Analyzer() {
     }
   }, [run]);
 
+  /**
+   * Spread files over the empty slots in order. `exclude` is a slot that was
+   * just given a file in the same event: its state is still "idle" until the
+   * next render, so it must not be handed a second one.
+   */
+  const distribute = useCallback(
+    (files: File[], exclude?: SlotId) => {
+      const idleSlots = SLOT_KEYS.filter((id) => id !== exclude && slots[id].status === "idle");
+      if (idleSlots.length === 0) {
+        showDropNotice(
+          exclude
+            ? `Loaded 1 file. The other ${files.length === 1 ? "file needs" : `${files.length} files need`} an empty slot; clear one to make room.`
+            : "All four slots are full. Clear one to make room.",
+        );
+        return;
+      }
+      const taken = files.slice(0, idleSlots.length);
+      taken.forEach((f, i) => void run(idleSlots[i]!, f));
+      const overflow = files.length - taken.length;
+      const loaded = taken.length + (exclude ? 1 : 0);
+      if (overflow > 0) {
+        showDropNotice(
+          overflow === 1
+            ? `Loaded ${loaded} files. 1 more than the free slots.`
+            : `Loaded ${loaded} files. ${overflow} more than the free slots.`,
+        );
+      }
+    },
+    [run, slots, showDropNotice],
+  );
+
   const onWindowDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
@@ -206,23 +237,9 @@ export function Analyzer() {
         showDropNotice(NOT_AUDIO_NOTICE);
         return;
       }
-      const idleSlots = SLOT_KEYS.filter((id) => slots[id].status === "idle");
-      if (idleSlots.length === 0) {
-        showDropNotice("All four slots are full. Clear one to make room.");
-        return;
-      }
-      const taken = files.slice(0, idleSlots.length);
-      taken.forEach((f, i) => void run(idleSlots[i]!, f));
-      const overflow = files.length - taken.length;
-      if (overflow > 0) {
-        showDropNotice(
-          overflow === 1
-            ? `Loaded ${taken.length} files. 1 more than the free slots.`
-            : `Loaded ${taken.length} files. ${overflow} more than the free slots.`,
-        );
-      }
+      distribute(files);
     },
-    [run, slots, showDropNotice],
+    [distribute, showDropNotice],
   );
 
   // ---- ready files -----------------------------------------------------------
@@ -873,6 +890,43 @@ export function Analyzer() {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      // Space: pause whatever plays, or resume the last copy at its position.
+      // Left to the browser on controls where Space already means "press".
+      if (e.key === " " || e.code === "Space") {
+        if (
+          e.repeat ||
+          (t &&
+            (["BUTTON", "SELECT", "SUMMARY", "A"].includes(t.tagName) ||
+              t.getAttribute("role") === "slider"))
+        )
+          return;
+        const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
+        const playing = els.filter((el) => !el.paused);
+        if (playing.length > 0) {
+          e.preventDefault();
+          for (const el of playing) el.pause();
+          return;
+        }
+        const last = lastPlayedRef.current;
+        const fallback = pairRef.current?.a
+          ? SLOT_KEYS.find((id) => analysesRef.current[id]?.id === pairRef.current?.a?.id)
+          : SLOT_KEYS.find((id) => analysesRef.current[id]);
+        const resume = last && analysesRef.current[last] ? last : fallback;
+        if (!resume) return;
+        e.preventDefault();
+        if (pairRef.current?.a && pairRef.current.b) abSwitch(resume);
+        else
+          void els
+            .find((el) => el.dataset.slot === resume)
+            ?.play()
+            .catch(() => undefined);
+        return;
+      }
+      if (e.key.toLowerCase() === "l" && pairRef.current?.a && pairRef.current.b) {
+        e.preventDefault();
+        toggleLoop();
+        return;
+      }
       const target = SLOT_KEYS.find((id) => id === e.key.toLowerCase());
       if (!target || !pairRef.current || !analysesRef.current[target]) return;
       if (abPlaying === target) return;
@@ -881,7 +935,7 @@ export function Analyzer() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [abPlaying, abSwitch]);
+  }, [abPlaying, abSwitch, toggleLoop]);
 
   // ---- excerpt re-scan (pin a scan at the playhead) ---------------------------------
 
@@ -930,6 +984,18 @@ export function Analyzer() {
     },
     [showDropNotice],
   );
+
+  // One frequency axis for every spectrogram: a 44.1 kHz copy next to a
+  // 96 kHz one must not stretch its 22 kHz to the same height as 48 kHz.
+  const displayMaxHz = useMemo(() => {
+    let top = 0;
+    for (const id of SLOT_KEYS) {
+      const a = analysisOf(slots[id]);
+      if (!a) continue;
+      top = Math.max(top, a.spectrogram.maxHz, overrides[id]?.maxHz ?? 0);
+    }
+    return top || undefined;
+  }, [slots, overrides]);
 
   // ---- verdict helpers ---------------------------------------------------------------
 
@@ -1069,7 +1135,15 @@ export function Analyzer() {
               <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
                 B
               </kbd>{" "}
-              to switch between clips. Use the five-second loop to repeat a passage.
+              to switch between clips,{" "}
+              <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+                Space
+              </kbd>{" "}
+              to pause, and{" "}
+              <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+                L
+              </kbd>{" "}
+              for the five-second loop.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <Button variant="outline" onClick={() => abSwitch("a")}>
@@ -1152,6 +1226,8 @@ export function Analyzer() {
                 override={overrides[id] ?? null}
                 onResetOverride={() => setOverrides((o) => ({ ...o, [id]: null }))}
                 onFile={(f) => void run(id, f)}
+                onExtraFiles={(files) => distribute(files, id)}
+                displayMaxHz={blindHidden ? undefined : displayMaxHz}
                 onClear={() => clear(id)}
                 onRejectedDrop={() => showDropNotice(NOT_AUDIO_NOTICE)}
               />

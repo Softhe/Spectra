@@ -14,11 +14,14 @@ export function AudioEquivalence({
   a,
   b,
   disabled = false,
+  unavailableReason = null,
   onResult,
 }: {
   a: File;
   b: File;
   disabled?: boolean;
+  /** Known before reading: why this pair can never match (no button then). */
+  unavailableReason?: string | null;
   onResult: (result: EquivalenceResult | null) => void;
 }) {
   const [running, setRunning] = useState(false);
@@ -65,6 +68,18 @@ export function AudioEquivalence({
       window.clearTimeout(timer);
       if (controller.current === current) setRunning(false);
     }
+  }
+
+  if (unavailableReason) {
+    return (
+      <section
+        className="mt-4 rounded-lg border border-border p-3"
+        aria-label="Complete audio check"
+      >
+        <h3 className="text-sm font-medium text-fg">Identical-audio check not available</h3>
+        <p className="mt-1 text-xs leading-relaxed text-muted">{unavailableReason}</p>
+      </section>
+    );
   }
 
   return (
