@@ -1,5 +1,5 @@
 import { fft, hann } from "./fft";
-import { isLosslessCodec } from "./format";
+import { codingKind, isLosslessCodec } from "./format";
 import { sniffContainer } from "./sniff";
 import { cacheGet, cacheKeyForFile, cachePut } from "./cache";
 import { runDspParallel } from "./dsp-client";
@@ -1932,6 +1932,21 @@ export function formatLimitHz(x: Pick<Analysis, "nyquistHz">): number {
 }
 
 /**
+ * True when the browser decoded below the rate the file declares (it fell
+ * back to 48 or 44.1 kHz). The measured ceiling is then the decoder's, not
+ * the format's, and no note may present it as a property of the file.
+ */
+export function decodedBelowFileRate(x: Pick<Analysis, "nyquistHz" | "container">): boolean {
+  const rate = decodeRateFor(x.container.sampleRate, x.container.codec);
+  return rate != null && rate > x.nyquistHz * 2 + 1;
+}
+
+/** "format limit", or "decode limit" when the browser decoded below the file's rate. */
+export function limitLabel(x: Pick<Analysis, "nyquistHz" | "container">): string {
+  return decodedBelowFileRate(x) ? "decode limit" : "format limit";
+}
+
+/**
  * A high-rate lossless file whose content stops near a CD/DVD band edge
  * (22.05 or 24 kHz) is consistent with a 44.1/48 kHz source converted to a
  * higher rate: the extra sample rate adds file size but no recording.
@@ -1940,7 +1955,7 @@ export function formatLimitHz(x: Pick<Analysis, "nyquistHz">): number {
 export function likelyUpsampledFrom(
   x: Pick<Analysis, "nyquistHz" | "cutoffHz" | "container" | "rolloff">,
 ): number | null {
-  if (!isLosslessCodec(x.container.codec) || x.nyquistHz < 44000) return null;
+  if (codingKind(x.container.codec) !== "lossless" || x.nyquistHz < 44000) return null;
   // Resampler anti-alias filters end in a cliff. A natural fade near 22 kHz
   // can be a genuine recording's microphone or mastering rolloff.
   if (x.rolloff === "natural") return null;
@@ -1975,14 +1990,16 @@ export function formatNotes(
     const [mono, stereo] = monoA ? [labels.a, labels.b] : [labels.b, labels.a];
     out += ` File ${mono} is mono and File ${stereo} has ${monoA ? b.channels : a.channels} channels. Any stereo information missing from File ${mono} is not part of this preference; listen to judge it.`;
   } else if (!monoA && !monoB) {
-    // Identical channels in a stereo file: a mono fold-down stored as stereo.
-    const dualA = a.stereoWidth < 0.001;
-    const dualB = b.stereoWidth < 0.001;
+    // Near-identical channels in a two-channel file: most likely a mono
+    // fold-down stored as stereo. stereoWidth is sampled, not an exact
+    // equality test, so the note says "almost identical".
+    const dualA = a.channels === 2 && a.stereoWidth < 0.001;
+    const dualB = b.channels === 2 && b.stereoWidth < 0.001;
     if (dualA !== dualB) {
       const [dual, real] = dualA ? [labels.a, labels.b] : [labels.b, labels.a];
       const realWidth = dualA ? b.stereoWidth : a.stereoWidth;
       if (realWidth >= 0.01)
-        out += ` File ${dual} has identical left and right channels (mono stored as stereo), while File ${real} carries stereo information. Channel layout is not part of this preference.`;
+        out += ` File ${dual} has almost identical left and right channels (likely mono stored as stereo), while File ${real} carries clear stereo information. Channel layout is not part of this preference.`;
     }
   }
   for (const [x, slot] of [
@@ -2173,12 +2190,13 @@ export function compareQualityMeasurements(
   const atLimit =
     airLead >= 500 &&
     worse.nyquistHz < better.nyquistHz - 500 &&
-    worse.cutoffHz >= formatLimitHz(worse) * 0.95
-      ? ` File ${worseSlot} reaches the limit of its format: a ${fmtKHz(worse.nyquistHz * 2)} file cannot hold anything above ${fmtKHz(worse.nyquistHz)}, so the difference reflects the sample rate rather than lost content.`
+    worse.cutoffHz >= formatLimitHz(worse) * 0.95 &&
+    !decodedBelowFileRate(worse)
+      ? ` File ${worseSlot} reaches the limit of its format: a ${fmtKHz(worse.nyquistHz * 2)} file cannot hold anything above ${fmtKHz(worse.nyquistHz)}, so the sample rate alone explains the difference above that point.`
       : "";
   const ultrasonic =
-    airLead >= 500 && worse.cutoffHz >= HEARING_LIMIT_HZ - 500
-      ? ` The extra bandwidth in File ${betterSlot} lies above ${(Math.max(HEARING_LIMIT_HZ, worse.cutoffHz) / 1000).toFixed(1)} kHz, beyond the range most adults hear. Listen before deciding it matters.`
+    airLead >= 500 && worse.cutoffHz >= HEARING_LIMIT_HZ
+      ? ` The extra bandwidth in File ${betterSlot} lies above ${(worse.cutoffHz / 1000).toFixed(1)} kHz, beyond the range most adults hear. Listen before deciding it matters.`
       : "";
 
   return {

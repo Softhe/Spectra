@@ -1,5 +1,6 @@
 import { Trophy } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { limitLabel } from "@/lib/audio/analyze";
 import { formatHz, frequencyTicksKHz } from "@/lib/audio/format";
 import type { Analysis, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
@@ -259,16 +260,17 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
         ctx.lineTo(x, h);
         ctx.stroke();
         ctx.setLineDash([]);
-        const who = traces
-          .filter((t) => t.x.nyquistHz === hz)
-          .map((t) => t.slot.toUpperCase())
-          .join("/");
+        const at = traces.filter((t) => t.x.nyquistHz === hz);
+        const who = at.map((t) => t.slot.toUpperCase()).join("/");
+        const label = at.some((t) => limitLabel(t.x) === "decode limit")
+          ? "decode limit"
+          : "format limit";
         ctx.save();
         ctx.translate(x + 4, h - 22);
         ctx.rotate(-Math.PI / 2);
         ctx.textAlign = "left";
         ctx.fillStyle = faintCol;
-        ctx.fillText(`${who} format limit ${formatHz(hz)}`, 0, 8);
+        ctx.fillText(`${who} ${label} ${formatHz(hz)}`, 0, 8);
         ctx.restore();
       }
       ctx.font = "12px 'IBM Plex Mono', monospace";

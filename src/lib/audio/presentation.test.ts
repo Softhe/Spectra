@@ -75,6 +75,19 @@ it("explains up front why the identical-audio check cannot match", async () => {
   assert.match(equivalencePrecheck(file("AIFF"), file("FLAC"), labels) ?? "", /AIFF files are not/);
   assert.equal(formatDescription(file("FLAC")), "FLAC · lossless");
   assert.equal(formatDescription(file("MP3")), "MP3 · lossy");
+  assert.equal(formatDescription(file("WAV")), "WAV · coding not identified");
+});
+
+it("reports the file's own sample rate, not a browser fallback decode rate", async () => {
+  const { fileSampleRate } = await import("./presentation.ts");
+  const at = (declared: number | null, decoded: number, codec = "FLAC") => ({
+    container: { ...container, codec, sampleRate: declared },
+    sampleRate: decoded,
+  });
+  assert.equal(fileSampleRate(at(192000, 48000)), 192000);
+  assert.equal(fileSampleRate(at(null, 48000)), 48000);
+  // HE-AAC: a 24 kHz core header decodes at the full 48 kHz.
+  assert.equal(fileSampleRate(at(24000, 48000, "AAC (HE)")), 48000);
 });
 
 it("spaces frequency ticks for CD and hi-res axes", async () => {

@@ -12,6 +12,8 @@ import {
   compareAnalyses,
   decodeErrorMessage,
   decodeRateFor,
+  decodedBelowFileRate,
+  limitLabel,
   pickRegions,
   pickRegionsFromBuffer,
   resampleFramesToDisplay,
@@ -1101,7 +1103,21 @@ describe("cross-format verdict notes", () => {
     const c = compareAnalyses(hires(), cd());
     assert.equal(c.winner, "a");
     assert.match(c.detail, /File B reaches the limit of its format: a 44\.1 kHz file/);
-    assert.match(c.detail, /reflects the sample rate rather than lost content/);
+    assert.match(c.detail, /the sample rate alone explains the difference above that point/);
+  });
+  it("does not blame the format when the browser decoded below the file's rate", () => {
+    const base = cd();
+    const fellBack = cd({ container: { ...base.container, sampleRate: 96000 } });
+    assert.equal(decodedBelowFileRate(fellBack), true);
+    assert.equal(limitLabel(fellBack), "decode limit");
+    assert.equal(decodedBelowFileRate(base), false);
+    const c = compareAnalyses(hires(), fellBack);
+    assert.doesNotMatch(c.detail, /limit of its format/);
+  });
+  it("keeps the hearing note off a lead that starts below 20 kHz", () => {
+    const c = compareAnalyses(hires({ cutoffHz: 23000 }), cd({ cutoffHz: 19600 }));
+    assert.equal(c.winner, "a");
+    assert.doesNotMatch(c.detail, /beyond the range most adults hear/);
   });
   it("flags a lead that lies entirely above hearing", () => {
     const c = compareAnalyses(hires(), cd());
@@ -1140,7 +1156,14 @@ describe("cross-format verdict notes", () => {
   });
   it("notes mono audio stored as stereo", () => {
     const c = compareAnalyses(cd({ stereoWidth: 0 }), cd({ id: "S", stereoWidth: 0.2 }));
-    assert.match(c.detail, /File A has identical left and right channels/);
+    assert.match(c.detail, /File A has almost identical left and right channels/);
+  });
+  it("keeps the mono-stored-as-stereo note to two-channel files", () => {
+    const c = compareAnalyses(
+      cd({ channels: 6, stereoWidth: 0 }),
+      cd({ id: "S", channels: 6, stereoWidth: 0.2 }),
+    );
+    assert.doesNotMatch(c.detail, /identical left and right/);
   });
   it("adds no channel note when the layouts agree", () => {
     const c = compareAnalyses(cd(), cd({ id: "S2" }));

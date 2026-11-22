@@ -890,20 +890,24 @@ export function Analyzer() {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      // Space and L are left to the browser on controls where the key
+      // already means something (Space presses a button; sliders take keys),
+      // and ignore auto-repeat so holding the key toggles once.
+      const onControl =
+        !!t &&
+        (["BUTTON", "SELECT", "SUMMARY", "A"].includes(t.tagName) ||
+          t.getAttribute("role") === "slider");
       // Space: pause whatever plays, or resume the last copy at its position.
-      // Left to the browser on controls where Space already means "press".
       if (e.key === " " || e.code === "Space") {
-        if (
-          e.repeat ||
-          (t &&
-            (["BUTTON", "SELECT", "SUMMARY", "A"].includes(t.tagName) ||
-              t.getAttribute("role") === "slider"))
-        )
-          return;
+        if (e.repeat || onControl) return;
         const els = [...document.querySelectorAll("audio[data-slot]")] as HTMLAudioElement[];
         const playing = els.filter((el) => !el.paused);
         if (playing.length > 0) {
           e.preventDefault();
+          // Invalidate an A/B switch still waiting on its seek, or its
+          // target would start playing after this pause.
+          switchSeq.current += 1;
+          switchPending.current = 0;
           for (const el of playing) el.pause();
           return;
         }
@@ -914,15 +918,21 @@ export function Analyzer() {
         const resume = last && analysesRef.current[last] ? last : fallback;
         if (!resume) return;
         e.preventDefault();
-        if (pairRef.current?.a && pairRef.current.b) abSwitch(resume);
-        else
-          void els
-            .find((el) => el.dataset.slot === resume)
-            ?.play()
-            .catch(() => undefined);
+        // Resume where playback paused. abSwitch is only for changing copies:
+        // with the loop on it would jump back to the passage start.
+        void els
+          .find((el) => el.dataset.slot === resume)
+          ?.play()
+          .catch(() => undefined);
         return;
       }
-      if (e.key.toLowerCase() === "l" && pairRef.current?.a && pairRef.current.b) {
+      if (
+        e.key.toLowerCase() === "l" &&
+        !e.repeat &&
+        !onControl &&
+        pairRef.current?.a &&
+        pairRef.current.b
+      ) {
         e.preventDefault();
         toggleLoop();
         return;

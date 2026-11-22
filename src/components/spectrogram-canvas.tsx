@@ -10,6 +10,7 @@ import {
   type PointerEvent,
 } from "react";
 import { buildLut, DB_MAX, DB_MIN } from "@/lib/audio/colormap";
+import { limitLabel } from "@/lib/audio/analyze";
 import { formatHz, frequencyTicksKHz } from "@/lib/audio/format";
 import type { Analysis, SpectrogramData } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
@@ -255,6 +256,12 @@ export function SpectrogramCanvas({
         <div
           ref={wrapRef}
           tabIndex={0}
+          role="group"
+          aria-label={
+            onSeek
+              ? `Spectrogram of ${analysis.fileName}. Click a point in time to play from it; use the up and down arrows to probe frequencies.`
+              : `Spectrogram of ${analysis.fileName}. Use the up and down arrows to probe frequencies.`
+          }
           className="relative h-48 w-full overflow-hidden rounded-md bg-bg-inset outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:h-64"
           title={
             onSeek
@@ -293,7 +300,7 @@ export function SpectrogramCanvas({
               className="pointer-events-none absolute left-1.5 rounded bg-bg/85 px-1 py-px font-mono text-[10px] leading-none text-muted"
               style={{ top: `${Math.max(0, limitPct - 0.5)}%`, transform: "translateY(-100%)" }}
             >
-              format limit {formatHz(data.maxHz).replace(" kHz", "k")}
+              {limitLabel(analysis)} {formatHz(data.maxHz).replace(" kHz", "k")}
             </span>
           )}
           {playheadPct != null && (

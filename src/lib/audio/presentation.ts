@@ -1,5 +1,12 @@
 import type { Analysis, Comparison, ComparisonCoverage } from "./types";
-import { channelLabel, formatDuration, formatSampleRate, isLosslessCodec } from "./format";
+import {
+  channelLabel,
+  codingKind,
+  formatDuration,
+  formatSampleRate,
+  isLosslessCodec,
+} from "./format";
+import { decodeRateFor } from "./analyze";
 
 export function bitrateDescription(audio: Pick<Analysis, "container">): {
   label: string;
@@ -58,17 +65,19 @@ export function preferenceDescription(comparison: Comparison): string {
 
 /** "FLAC · lossless" / "MP3 · lossy": the file's coding, as the table shows it. */
 export function formatDescription(audio: Pick<Analysis, "container">): string {
-  return `${audio.container.codec} · ${isLosslessCodec(audio.container.codec) ? "lossless" : "lossy"}`;
+  const kind = codingKind(audio.container.codec);
+  return `${audio.container.codec} · ${kind === "unknown" ? "coding not identified" : kind}`;
 }
 
 /**
- * The sample rate the audio was measured at. Every codec decodes at its own
- * rate, except HE-AAC whose header advertises a half-rate core while the
- * decoder outputs the full rate (see decodeRateFor), so the decode rate is
- * the honest figure.
+ * The file's own sample rate: the container's declared rate, mapped through
+ * decodeRateFor so an HE-AAC half-rate core reads as its full output rate.
+ * Falls back to the decode rate when the container gives none. This can
+ * exceed the decode rate when the browser could not decode at the file's
+ * rate and fell back to 48 or 44.1 kHz.
  */
-export function fileSampleRate(audio: Pick<Analysis, "sampleRate">): number {
-  return audio.sampleRate;
+export function fileSampleRate(audio: Pick<Analysis, "sampleRate" | "container">): number {
+  return decodeRateFor(audio.container.sampleRate, audio.container.codec) ?? audio.sampleRate;
 }
 
 type EquivalenceInput = Pick<Analysis, "container" | "sampleRate" | "channels">;

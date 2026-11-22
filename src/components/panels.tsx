@@ -28,7 +28,7 @@ import {
 } from "@/lib/audio/presentation";
 import { SlotBadge } from "@/components/file-slot";
 import { SLOT_LABELS } from "@/components/slot-labels";
-import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
+import { limitLabel, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
   channelLabel,
   formatBytes,
@@ -359,7 +359,7 @@ function EvidenceStrip({
                   <span
                     className="absolute -top-1 -bottom-1 w-px bg-fg/45"
                     style={{ left: `${(x.nyquistHz / scaleHz) * 100}%` }}
-                    title={`Format limit ${formatHz(x.nyquistHz)}`}
+                    title={`${limitLabel(x) === "decode limit" ? "Browser decode limit" : "Format limit"} ${formatHz(x.nyquistHz)}`}
                   />
                 )}
                 <div

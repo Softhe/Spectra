@@ -4,8 +4,8 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 import { audioFilesFrom, STOP_EVENT } from "@/components/audio-drop";
 import { SpectrogramCanvas } from "@/components/spectrogram-canvas";
 import { Button } from "@/components/ui/button";
-import { bitrateDescription } from "@/lib/audio/presentation";
-import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
+import { bitrateDescription, fileSampleRate } from "@/lib/audio/presentation";
+import { decodedBelowFileRate, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
   channelLabel,
   formatBytes,
@@ -644,8 +644,12 @@ export function FileSlot({
                   <Stat label="Rolloff" value={ROLLOFF_LABEL[state.analysis.rolloff]} />
                   <Stat
                     label="Sample rate"
-                    value={`${formatSampleRate(state.analysis.sampleRate)} · ${channelLabel(state.analysis.channels)}`}
-                    note={`Format limit ${formatHz(state.analysis.nyquistHz)}`}
+                    value={`${formatSampleRate(fileSampleRate(state.analysis))} · ${channelLabel(state.analysis.channels)}`}
+                    note={
+                      decodedBelowFileRate(state.analysis)
+                        ? `Browser decoded at ${formatSampleRate(state.analysis.sampleRate)}: limit ${formatHz(state.analysis.nyquistHz)}`
+                        : `Format limit ${formatHz(state.analysis.nyquistHz)}`
+                    }
                   />
                   <Stat
                     label="Peak / RMS"

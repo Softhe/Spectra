@@ -44,6 +44,16 @@ export function channelLabel(n: number): string {
   return `${n} ch`;
 }
 
+/**
+ * How a codec stores samples. A bare "WAV" label means the sniffer saw a
+ * WAVE file whose format tag is not PCM (ADPCM, GSM, …) or could not read
+ * it, so its coding is unknown. A bare "CAF" label is CAF linear PCM.
+ */
+export function codingKind(codec: string): "lossless" | "lossy" | "unknown" {
+  if (/^WAV$/i.test(codec.trim())) return "unknown";
+  return /FLAC|PCM|ALAC|AIFF|CAF/i.test(codec) ? "lossless" : "lossy";
+}
+
 /** Codecs that store decoded samples exactly (no perceptual coding). */
 export function isLosslessCodec(codec: string): boolean {
   return /FLAC|PCM|ALAC|WAV|AIFF|CAF/i.test(codec);
