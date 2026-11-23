@@ -248,10 +248,17 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
       // A file whose format ends inside the axis can't have content past
       // that line: mark it so an empty right side reads as "can't", not "lost".
       ctx.font = "11px 'IBM Plex Mono', monospace";
-      const limits = [...new Set(traces.map((t) => t.x.nyquistHz))].filter(
-        (hz) => hz < maxHz - 200,
-      );
-      for (const hz of limits) {
+      // One marker per boundary and limit kind: a file decoded below its
+      // own rate shares a line with a native file but not its label.
+      const limits = [
+        ...new Map(
+          traces
+            .filter((t) => t.x.nyquistHz < maxHz - 200)
+            .map((t) => [`${t.x.nyquistHz}|${limitLabel(t.x)}`, t.x.nyquistHz] as const),
+        ),
+      ];
+      for (const [key, hz] of limits) {
+        const label = key.slice(key.indexOf("|") + 1);
         const x = (hz / maxHz) * w;
         ctx.strokeStyle = "rgba(232,234,238,0.35)";
         ctx.setLineDash([1, 3]);
@@ -260,11 +267,10 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
         ctx.lineTo(x, h);
         ctx.stroke();
         ctx.setLineDash([]);
-        const at = traces.filter((t) => t.x.nyquistHz === hz);
-        const who = at.map((t) => t.slot.toUpperCase()).join("/");
-        const label = at.some((t) => limitLabel(t.x) === "decode limit")
-          ? "decode limit"
-          : "format limit";
+        const who = traces
+          .filter((t) => t.x.nyquistHz === hz && limitLabel(t.x) === label)
+          .map((t) => t.slot.toUpperCase())
+          .join("/");
         ctx.save();
         ctx.translate(x + 4, h - 22);
         ctx.rotate(-Math.PI / 2);

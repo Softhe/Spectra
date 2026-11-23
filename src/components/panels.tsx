@@ -23,6 +23,7 @@ import {
   coverageDescription,
   equivalencePrecheck,
   fileSampleRate,
+  sampleRateText,
   formatDescription,
   preferenceDescription,
 } from "@/lib/audio/presentation";
@@ -34,7 +35,6 @@ import {
   formatBytes,
   formatDuration,
   formatHz,
-  formatSampleRate,
 } from "@/lib/audio/format";
 import type { Analysis, Comparison, ScoreParts, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
@@ -419,7 +419,7 @@ function CopyReport({
     const fileLine = (slot: string, x: Analysis) =>
       [
         `File ${slot}: ${x.fileName}`,
-        `  container: ${formatDescription(x)}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${formatSampleRate(fileSampleRate(x))} ${channelLabel(x.channels)}`,
+        `  container: ${formatDescription(x)}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${sampleRateText(x)} ${channelLabel(x.channels)}`,
         `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, experimental score ${x.score.toFixed(0)}/100`,
         `  ${bitrateDescription(x).label}: ${bitrateDescription(x).value}`,
         `  bit depth: ${bitDepthRow(x)}`,
@@ -671,11 +671,11 @@ export function CompareTable({
     { label: "Format", av: formatDescription(a), bv: formatDescription(b) },
     {
       label: "Sample rate",
-      av: formatSampleRate(rateA),
-      bv: formatSampleRate(rateB),
+      av: sampleRateText(a),
+      bv: sampleRateText(b),
       note:
-        rateA !== rateB
-          ? `Highest frequency each format can hold: ${formatHz(rateA / 2)} and ${formatHz(rateB / 2)}.`
+        rateA !== rateB || a.nyquistHz !== b.nyquistHz
+          ? `Highest frequency each copy can hold as decoded: ${formatHz(a.nyquistHz)} and ${formatHz(b.nyquistHz)}.`
           : undefined,
     },
     { label: "Channels", av: channelLabel(a.channels), bv: channelLabel(b.channels) },

@@ -919,7 +919,11 @@ export function Analyzer() {
         if (!resume) return;
         e.preventDefault();
         // Resume where playback paused. abSwitch is only for changing copies:
-        // with the loop on it would jump back to the passage start.
+        // with the loop on it would jump back to the passage start. A fade
+        // still pending from a recent switch must not pause the resumed copy
+        // or leave it at a partly faded level.
+        fadeSeq.current[resume] = (fadeSeq.current[resume] ?? 0) + 1;
+        applyVolumes();
         void els
           .find((el) => el.dataset.slot === resume)
           ?.play()
@@ -945,7 +949,7 @@ export function Analyzer() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [abPlaying, abSwitch, toggleLoop]);
+  }, [abPlaying, abSwitch, applyVolumes, toggleLoop]);
 
   // ---- excerpt re-scan (pin a scan at the playhead) ---------------------------------
 

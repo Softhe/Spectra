@@ -6,7 +6,6 @@ import {
   formatSampleRate,
   isLosslessCodec,
 } from "./format";
-import { decodeRateFor } from "./analyze";
 
 export function bitrateDescription(audio: Pick<Analysis, "container">): {
   label: string;
@@ -70,14 +69,21 @@ export function formatDescription(audio: Pick<Analysis, "container">): string {
 }
 
 /**
- * The file's own sample rate: the container's declared rate, mapped through
- * decodeRateFor so an HE-AAC half-rate core reads as its full output rate.
- * Falls back to the decode rate when the container gives none. This can
- * exceed the decode rate when the browser could not decode at the file's
- * rate and fell back to 48 or 44.1 kHz.
+ * The sample rate the file's header declares, or the decode rate when the
+ * header gives none. It can differ from the decode rate: a browser that
+ * cannot decode at the file's rate falls back to 48 or 44.1 kHz, and an
+ * HE-AAC header may declare its half-rate core while decoding at full rate.
  */
 export function fileSampleRate(audio: Pick<Analysis, "sampleRate" | "container">): number {
-  return decodeRateFor(audio.container.sampleRate, audio.container.codec) ?? audio.sampleRate;
+  return audio.container.sampleRate ?? audio.sampleRate;
+}
+
+/** "96 kHz", or "96 kHz (decoded at 48 kHz)" when the two rates differ. */
+export function sampleRateText(audio: Pick<Analysis, "sampleRate" | "container">): string {
+  const declared = fileSampleRate(audio);
+  return declared === audio.sampleRate
+    ? formatSampleRate(declared)
+    : `${formatSampleRate(declared)} (decoded at ${formatSampleRate(audio.sampleRate)})`;
 }
 
 type EquivalenceInput = Pick<Analysis, "container" | "sampleRate" | "channels">;

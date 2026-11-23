@@ -79,15 +79,17 @@ it("explains up front why the identical-audio check cannot match", async () => {
 });
 
 it("reports the file's own sample rate, not a browser fallback decode rate", async () => {
-  const { fileSampleRate } = await import("./presentation.ts");
+  const { fileSampleRate, sampleRateText } = await import("./presentation.ts");
   const at = (declared: number | null, decoded: number, codec = "FLAC") => ({
     container: { ...container, codec, sampleRate: declared },
     sampleRate: decoded,
   });
   assert.equal(fileSampleRate(at(192000, 48000)), 192000);
   assert.equal(fileSampleRate(at(null, 48000)), 48000);
-  // HE-AAC: a 24 kHz core header decodes at the full 48 kHz.
-  assert.equal(fileSampleRate(at(24000, 48000, "AAC (HE)")), 48000);
+  // An AAC header declaring 24 kHz stays 24 kHz; the decode rate is shown beside it.
+  assert.equal(fileSampleRate(at(24000, 48000, "AAC")), 24000);
+  assert.equal(sampleRateText(at(24000, 48000, "AAC")), "24 kHz (decoded at 48 kHz)");
+  assert.equal(sampleRateText(at(44100, 44100)), "44.1 kHz");
 });
 
 it("spaces frequency ticks for CD and hi-res axes", async () => {
