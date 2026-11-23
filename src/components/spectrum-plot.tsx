@@ -1,6 +1,7 @@
 import { Trophy } from "lucide-react";
 import { useEffect, useRef } from "react";
-import { formatHz } from "@/lib/audio/format";
+import { limitLabel } from "@/lib/audio/analyze";
+import { formatHz, frequencyTicksKHz } from "@/lib/audio/format";
 import type { Analysis, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
@@ -21,6 +22,18 @@ type Props = {
   winnerSlot?: SlotId | null;
   className?: string;
 };
+
+/** Above this the plot would squash the audible band into a sliver. */
+const PLOT_MAX_HZ = 48000;
+const HEARING_HZ = 20000;
+
+/**
+ * The shared frequency axis: the widest file's Nyquist (meanDb runs to it),
+ * never narrower than the CD band so 44.1/48 kHz pairs keep their old view.
+ */
+function plotMaxHz(files: (Analysis | null)[]): number {
+  return Math.min(PLOT_MAX_HZ, Math.max(22050, ...files.map((f) => f?.nyquistHz ?? 0)));
+}
 
 /** `#rrggbb` → rgba() at `alpha`; other colour syntaxes pass through opaque. */
 function hexAlpha(color: string, alpha: number): string {
@@ -86,7 +99,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
       ctx.clearRect(0, 0, fullWidth, h);
       ctx.translate(GUTTER_PX, 0);
 
-      const maxHz = Math.max(22050, ...files.map((f) => f?.spectrogram.maxHz ?? 0));
+      const maxHz = plotMaxHz(files);
       const dbMin = -90;
       // Loud low end must not flat-line against the top edge: lift the
       // ceiling to the next 10 dB above the hottest *drawn* bin (never below
@@ -99,9 +112,32 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
       }
       const dbMax = Math.max(-10, Math.ceil((peak + 2) / 10) * 10);
 
+      const faintCol = getComputedStyle(wrap).getPropertyValue("--color-faint").trim() || "#7b808a";
+      // Hi-res axis: the band above hearing is tinted, so a lead that lives
+      // only there reads as ultrasonic at a glance.
+      if (maxHz > HEARING_HZ + 2000) {
+        const xh = (HEARING_HZ / maxHz) * w;
+        ctx.fillStyle = "rgba(232,234,238,0.035)";
+        ctx.fillRect(xh, 0, w - xh, h);
+        ctx.font = "11px 'IBM Plex Mono', monospace";
+        ctx.textAlign = "left";
+        ctx.fillStyle = faintCol;
+        // Start the caption past any format-limit line (and its rotated
+        // label) that falls just above 20 kHz, so the two never overlap.
+        const limitXs = files
+          .filter((f): f is Analysis => !!f && f.nyquistHz < maxHz - 200)
+          .map((f) => (f.nyquistHz / maxHz) * w);
+        const nearLimit = limitXs.filter((x) => x >= xh - 4 && x < xh + 200);
+        const textX = Math.max(xh + 6, ...nearLimit.map((x) => x + 18));
+        const caption =
+          w - textX >= ctx.measureText("above 20 kHz hearing range").width + 4
+            ? "above 20 kHz hearing range"
+            : "above hearing";
+        if (w - textX >= ctx.measureText(caption).width + 4) ctx.fillText(caption, textX, h - 8);
+      }
       ctx.strokeStyle = "rgba(232,234,238,0.08)";
       ctx.lineWidth = 1;
-      for (const kHz of [5, 10, 15, 20]) {
+      for (const kHz of frequencyTicksKHz(maxHz)) {
         const x = ((kHz * 1000) / maxHz) * w;
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -209,6 +245,42 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
       ctx.globalAlpha = 1;
       ctx.setLineDash([]);
 
+      // A file whose format ends inside the axis can't have content past
+      // that line: mark it so an empty right side reads as "can't", not "lost".
+      ctx.font = "11px 'IBM Plex Mono', monospace";
+      // One marker per boundary and limit kind: a file decoded below its
+      // own rate shares a line with a native file but not its label.
+      const limits = [
+        ...new Map(
+          traces
+            .filter((t) => t.x.nyquistHz < maxHz - 200)
+            .map((t) => [`${t.x.nyquistHz}|${limitLabel(t.x)}`, t.x.nyquistHz] as const),
+        ),
+      ];
+      for (const [key, hz] of limits) {
+        const label = key.slice(key.indexOf("|") + 1);
+        const x = (hz / maxHz) * w;
+        ctx.strokeStyle = "rgba(232,234,238,0.35)";
+        ctx.setLineDash([1, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const who = traces
+          .filter((t) => t.x.nyquistHz === hz && limitLabel(t.x) === label)
+          .map((t) => t.slot.toUpperCase())
+          .join("/");
+        ctx.save();
+        ctx.translate(x + 4, h - 22);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = "left";
+        ctx.fillStyle = faintCol;
+        ctx.fillText(`${who} ${label} ${formatHz(hz)}`, 0, 8);
+        ctx.restore();
+      }
+      ctx.font = "12px 'IBM Plex Mono', monospace";
+
       const mark = (hz: number, color: string, label: string, y: number) => {
         const x = (hz / maxHz) * w;
         ctx.strokeStyle = color;
@@ -254,7 +326,7 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
 
   // Same axis width the canvas paints (paint() clamps at 22050): labels must
   // sit at the true frequency positions, not at fixed thirds of the box.
-  const maxHzLabel = Math.max(22050, ...files.map((f) => f?.spectrogram.maxHz ?? 0));
+  const maxHzLabel = plotMaxHz(files);
 
   return (
     <div
@@ -305,8 +377,8 @@ export function SpectrumPlot({ files, winnerSlot, className }: Props) {
         style={{ marginLeft: GUTTER_PX }}
       >
         <span className="absolute left-0">0</span>
-        {[5, 10, 15, 20]
-          .filter((k) => k * 1000 < maxHzLabel)
+        {frequencyTicksKHz(maxHzLabel)
+          .filter((k) => k * 1000 < maxHzLabel - 500)
           .map((k) => (
             <span
               key={k}

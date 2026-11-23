@@ -43,3 +43,29 @@ export function channelLabel(n: number): string {
   if (n === 2) return "Stereo";
   return `${n} ch`;
 }
+
+/**
+ * How a codec stores samples. A bare "WAV" label means the sniffer saw a
+ * WAVE file whose format tag is not PCM (ADPCM, GSM, …) or could not read
+ * it, so its coding is unknown. A bare "CAF" label is CAF linear PCM.
+ */
+export function codingKind(codec: string): "lossless" | "lossy" | "unknown" {
+  if (/^WAV$/i.test(codec.trim())) return "unknown";
+  return /FLAC|PCM|ALAC|AIFF|CAF/i.test(codec) ? "lossless" : "lossy";
+}
+
+/** Codecs that store decoded samples exactly (no perceptual coding). */
+export function isLosslessCodec(codec: string): boolean {
+  return /FLAC|PCM|ALAC|WAV|AIFF|CAF/i.test(codec);
+}
+
+/**
+ * Frequency-axis ticks in kHz for a 0..maxHz axis: every 5 kHz up to the CD
+ * band, every 10 kHz on hi-res ranges so labels never crowd.
+ */
+export function frequencyTicksKHz(maxHz: number): number[] {
+  const step = maxHz > 26000 ? 10 : 5;
+  const ticks: number[] = [];
+  for (let k = step; k * 1000 <= maxHz + 50; k += step) ticks.push(k);
+  return ticks;
+}

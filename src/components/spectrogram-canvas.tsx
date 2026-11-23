@@ -6,10 +6,12 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
   type PointerEvent,
 } from "react";
 import { buildLut, DB_MAX, DB_MIN } from "@/lib/audio/colormap";
-import { formatHz } from "@/lib/audio/format";
+import { limitLabel } from "@/lib/audio/analyze";
+import { formatHz, frequencyTicksKHz } from "@/lib/audio/format";
 import type { Analysis, SpectrogramData } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
 
@@ -25,11 +27,33 @@ type Props = {
   override?: SpectrogramData | null;
   /** Clears the pinned excerpt (button is only shown when one is pinned). */
   onResetOverride?: () => void;
+  /**
+   * Shared top of the frequency axis across slots. A file whose data ends
+   * lower (a 44.1 kHz copy beside a 96 kHz one) draws on the same scale, with
+   * the region above its format limit shaded instead of stretched.
+   */
+  displayMaxHz?: number;
+  /** Playback position in seconds; drawn when inside the excerpt. */
+  playheadSec?: number;
+  /** Click on the picture: seek this copy to that moment of the excerpt. */
+  onSeek?: (sec: number) => void;
   className?: string;
 };
 
-export function SpectrogramCanvas({ analysis, override, onResetOverride, className }: Props) {
+export function SpectrogramCanvas({
+  analysis,
+  override,
+  onResetOverride,
+  displayMaxHz,
+  playheadSec,
+  onSeek,
+  className,
+}: Props) {
   const data = override ?? analysis.spectrogram;
+  // Top of the drawn axis. Never below this file's own data range.
+  const axisMaxHz = Math.max(data.maxHz, displayMaxHz ?? 0);
+  // Fraction of the plot height that holds this file's data (from the bottom).
+  const dataFrac = data.maxHz / axisMaxHz;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hoverRaf = useRef(0);
@@ -87,11 +111,30 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
 
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(spectrumImage, 0, 0, w, h);
+    const dataH = Math.round(h * dataFrac);
+    ctx.drawImage(spectrumImage, 0, h - dataH, w, dataH);
 
     const { cutoffHz, nyquistHz } = analysis;
-    const maxHz = data.maxHz;
+    const maxHz = axisMaxHz;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (dataFrac < 0.995) {
+      // Above this file's data: diagonal hatching, so "nothing here" reads
+      // as a format boundary rather than silence the encoder removed.
+      const topH = cssH * (1 - dataFrac);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, cssW, topH);
+      ctx.clip();
+      ctx.strokeStyle = "rgba(232, 234, 238, 0.07)";
+      ctx.lineWidth = 1;
+      for (let x = -topH; x < cssW; x += 8) {
+        ctx.beginPath();
+        ctx.moveTo(x, topH);
+        ctx.lineTo(x + topH, 0);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
     // A ceiling at/above the displayed top (full-band 48 kHz / hi-res files)
     // has no in-view edge to mark. cutoffHz is clamped to the decode Nyquist,
     // not to maxHz, so it can exceed the display range; drawing then lands
@@ -117,7 +160,7 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
       ctx.lineTo(cssW, ny);
       ctx.stroke();
     }
-  }, [analysis, data, spectrumImage]);
+  }, [analysis, axisMaxHz, dataFrac, spectrumImage]);
 
   useEffect(() => {
     draw();
@@ -149,7 +192,7 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
       if (!wrap) return;
       const rect = wrap.getBoundingClientRect();
       const t = 1 - (clientY - rect.top) / rect.height;
-      setHover(Math.max(0, Math.min(data.maxHz, t * data.maxHz)));
+      setHover(Math.max(0, Math.min(axisMaxHz, t * axisMaxHz)));
     });
   }
 
@@ -159,7 +202,7 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
     else if (e.key === "ArrowDown") delta = -hoverStepHz;
     else if (e.key === "Home") {
       e.preventDefault();
-      setHover(data.maxHz);
+      setHover(axisMaxHz);
       return;
     } else if (e.key === "End") {
       e.preventDefault();
@@ -170,25 +213,42 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
     }
     e.preventDefault();
     setHover((h) => {
-      const base = h ?? data.maxHz / 2;
-      return Math.max(0, Math.min(data.maxHz, base + delta));
+      const base = h ?? axisMaxHz / 2;
+      return Math.max(0, Math.min(axisMaxHz, base + delta));
     });
   }
 
   // Keyboard probes need a percentage position. no rect measurement at
   // render time. Pointer probes land on the same representation.
-  const hoverTop = hover == null ? null : (1 - hover / data.maxHz) * 100;
+  const hoverTop = hover == null ? null : (1 - hover / axisMaxHz) * 100;
 
   // Axis positions are percent-from-top of the 0..maxHz column. The tick set
   // is fixed so every file reads against identical axes; the measured
   // ceiling gets its own label on the dashed line inside the plot instead of
   // displacing a tick (which made the two axes differ at a glance).
-  const pctOf = (hz: number) => (1 - hz / data.maxHz) * 100;
+  const pctOf = (hz: number) => (1 - hz / axisMaxHz) * 100;
   const ceilingPct = Math.max(0, pctOf(analysis.cutoffHz));
-  const ceilingInView = analysis.cutoffHz < data.maxHz - 0.5;
+  const ceilingInView = analysis.cutoffHz < axisMaxHz - 0.5;
   // Near the top there is no room above the line, so the label hangs below it.
   const ceilingLabelBelow = ceilingPct < 12;
-  const ticks = [0, 5, 10, 15, 20].filter((k) => k * 1000 <= data.maxHz + 50);
+  const ticks = [0, ...frequencyTicksKHz(axisMaxHz)];
+  // The hatched band is this file's format boundary when its data reaches
+  // its own Nyquist (always, since the display range covers 48 kHz).
+  const limitPct = (1 - dataFrac) * 100;
+  const playheadPct =
+    playheadSec != null &&
+    playheadSec >= data.excerptStartSec &&
+    playheadSec <= data.excerptStartSec + data.durationSec &&
+    data.durationSec > 0
+      ? ((playheadSec - data.excerptStartSec) / data.durationSec) * 100
+      : null;
+
+  function onClickSeek(e: MouseEvent<HTMLDivElement>) {
+    if (!onSeek || data.durationSec <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    onSeek(data.excerptStartSec + frac * data.durationSec);
+  }
 
   return (
     <div className={cn("flex gap-2", className)}>
@@ -196,15 +256,26 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
         <div
           ref={wrapRef}
           tabIndex={0}
+          role="group"
+          aria-label={
+            onSeek
+              ? `Spectrogram of ${analysis.fileName}. Click a point in time to play from it; use the up and down arrows to probe frequencies.`
+              : `Spectrogram of ${analysis.fileName}. Use the up and down arrows to probe frequencies.`
+          }
           className="relative h-48 w-full overflow-hidden rounded-md bg-bg-inset outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:h-64"
-          title="Use ↑ / ↓ to probe frequencies with the keyboard"
+          title={
+            onSeek
+              ? "Click to play from that moment. Use ↑ / ↓ to probe frequencies with the keyboard"
+              : "Use ↑ / ↓ to probe frequencies with the keyboard"
+          }
+          onClick={onClickSeek}
           onPointerMove={onPointer}
           onPointerEnter={onPointer}
           onPointerLeave={() => setHover(null)}
           onKeyDown={onProbeKey}
           onFocus={() =>
             // Arriving by keyboard should show something to move immediately.
-            setHover((h) => h ?? data.maxHz / 2)
+            setHover((h) => h ?? axisMaxHz / 2)
           }
           onBlur={() => setHover(null)}
         >
@@ -224,6 +295,21 @@ export function SpectrogramCanvas({ analysis, override, onResetOverride, classNa
             {ceilingInView ? "" : "≥ "}
             {formatHz(analysis.cutoffHz).replace(" kHz", "k")}
           </span>
+          {limitPct > 0.5 && (
+            <span
+              className="pointer-events-none absolute left-1.5 rounded bg-bg/85 px-1 py-px font-mono text-[10px] leading-none text-muted"
+              style={{ top: `${Math.max(0, limitPct - 0.5)}%`, transform: "translateY(-100%)" }}
+            >
+              {limitLabel(analysis)} {formatHz(data.maxHz).replace(" kHz", "k")}
+            </span>
+          )}
+          {playheadPct != null && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 w-px bg-fg/80"
+              style={{ left: `${playheadPct}%` }}
+            />
+          )}
           {hoverTop != null && (
             <div
               className="pointer-events-none absolute inset-x-0 h-px bg-fg/70"

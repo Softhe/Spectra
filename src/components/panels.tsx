@@ -21,17 +21,20 @@ import type { EquivalenceResult } from "@/lib/audio/equivalence";
 import {
   bitrateDescription,
   coverageDescription,
+  equivalencePrecheck,
+  fileSampleRate,
+  sampleRateText,
+  formatDescription,
   preferenceDescription,
 } from "@/lib/audio/presentation";
 import { SlotBadge } from "@/components/file-slot";
 import { SLOT_LABELS } from "@/components/slot-labels";
-import { QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
+import { limitLabel, QUALITY_LABEL, ROLLOFF_LABEL } from "@/lib/audio/analyze";
 import {
   channelLabel,
   formatBytes,
   formatDuration,
   formatHz,
-  formatSampleRate,
 } from "@/lib/audio/format";
 import type { Analysis, Comparison, ScoreParts, SlotId } from "@/lib/audio/types";
 import { cn } from "@/lib/utils";
@@ -205,7 +208,15 @@ export function Verdict({
         <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
           {slotB.toUpperCase()}
         </kbd>{" "}
-        to switch.
+        to switch,{" "}
+        <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+          Space
+        </kbd>{" "}
+        to pause or resume,{" "}
+        <kbd className="rounded border border-border bg-bg-subtle px-1 py-px font-mono text-[10px] text-muted">
+          L
+        </kbd>{" "}
+        to loop. Click a spectrogram to play that copy from that moment.
       </p>
 
       <ul className="relative mt-4 flex flex-col gap-1.5 text-xs text-muted">
@@ -228,7 +239,16 @@ export function Verdict({
         </p>
       )}
       {fileA && fileB && (
-        <AudioEquivalence a={fileA} b={fileB} disabled={analysisBusy} onResult={setEquivalence} />
+        <AudioEquivalence
+          a={fileA}
+          b={fileB}
+          disabled={analysisBusy}
+          unavailableReason={equivalencePrecheck(a, b, {
+            a: slotA.toUpperCase(),
+            b: slotB.toUpperCase(),
+          })}
+          onResult={setEquivalence}
+        />
       )}
       <details className="mt-4">
         <summary className="cursor-pointer text-xs text-muted hover:text-fg">
@@ -333,7 +353,15 @@ function EvidenceStrip({
                   {formatHz(x.cutoffHz)}
                 </dd>
               </div>
-              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-bg-subtle" aria-hidden>
+              <div className="relative mt-1.5 h-1.5 rounded-full bg-bg-subtle" aria-hidden>
+                {x.nyquistHz < scaleHz - 200 && (
+                  // This file's format ceiling: nothing can reach past it.
+                  <span
+                    className="absolute -top-1 -bottom-1 w-px bg-fg/45"
+                    style={{ left: `${(x.nyquistHz / scaleHz) * 100}%` }}
+                    title={`${limitLabel(x) === "decode limit" ? "Browser decode limit" : "Format limit"} ${formatHz(x.nyquistHz)}`}
+                  />
+                )}
                 <div
                   className={cn(
                     "h-full rounded-full",
@@ -357,6 +385,12 @@ function EvidenceStrip({
         <span>0</span>
         <span className="whitespace-nowrap tabular-nums">Scale {formatHz(scaleHz)}</span>
       </div>
+      {rows.some(({ x }) => x.nyquistHz < scaleHz - 200) && (
+        <p className="mt-2 flex items-center gap-1.5 text-[11px] leading-snug text-faint">
+          <span aria-hidden className="inline-block h-3 w-px bg-fg/45" />
+          Format limit: the highest frequency a file&rsquo;s sample rate can hold.
+        </p>
+      )}
     </div>
   );
 }
@@ -385,9 +419,10 @@ function CopyReport({
     const fileLine = (slot: string, x: Analysis) =>
       [
         `File ${slot}: ${x.fileName}`,
-        `  container: ${x.container.codec}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${formatSampleRate(x.sampleRate)} ${channelLabel(x.channels)}`,
+        `  container: ${formatDescription(x)}, ${formatBytes(x.fileSize)}, ${formatDuration(x.durationSec)}, ${sampleRateText(x)} ${channelLabel(x.channels)}`,
         `  measured: ceiling ${formatHz(x.cutoffHz)} (${ROLLOFF_LABEL[x.rolloff]}), ${QUALITY_LABEL[x.qualityClass]}, experimental score ${x.score.toFixed(0)}/100`,
         `  ${bitrateDescription(x).label}: ${bitrateDescription(x).value}`,
+        `  bit depth: ${bitDepthRow(x)}`,
       ].join("\n");
     const text = [
       `Spectra comparison: ${comparison.headline}`,
@@ -628,6 +663,30 @@ export function CompareTable({
 }) {
   const headA = SLOT_LABELS[slotA];
   const headB = SLOT_LABELS[slotB];
+  // What the files are. Differences here are why a mixed-format pair can
+  // disagree on measurements, so a differing row is called out.
+  const rateA = fileSampleRate(a);
+  const rateB = fileSampleRate(b);
+  const fileRows: { label: string; av: string; bv: string; note?: string }[] = [
+    { label: "Format", av: formatDescription(a), bv: formatDescription(b) },
+    {
+      label: "Sample rate",
+      av: sampleRateText(a),
+      bv: sampleRateText(b),
+      note:
+        rateA !== rateB || a.nyquistHz !== b.nyquistHz
+          ? `Highest frequency each copy can hold as decoded: ${formatHz(a.nyquistHz)} and ${formatHz(b.nyquistHz)}.`
+          : undefined,
+    },
+    { label: "Channels", av: channelLabel(a.channels), bv: channelLabel(b.channels) },
+    {
+      label: "Bit depth",
+      av: bitDepthRow(a),
+      bv: bitDepthRow(b),
+      note: "Shown for reference. Bit depth does not affect the preference.",
+    },
+    { label: "Duration", av: formatDuration(a.durationSec), bv: formatDuration(b.durationSec) },
+  ];
   const rows: { label: string; av: string; bv: string; better?: SlotId | "tie" }[] = [
     {
       label: "Preference",
@@ -656,19 +715,6 @@ export function CompareTable({
       label: "Audio data rate",
       av: `${bitrateDescription(a).label}: ${bitrateDescription(a).value}`,
       bv: `${bitrateDescription(b).label}: ${bitrateDescription(b).value}`,
-    },
-    {
-      label: "Bit depth",
-      av: bitDepthRow(a),
-      bv: bitDepthRow(b),
-      better:
-        typeof a.effectiveBits === "number" && typeof b.effectiveBits === "number"
-          ? a.effectiveBits === b.effectiveBits
-            ? "tie"
-            : a.effectiveBits > b.effectiveBits
-              ? "a"
-              : "b"
-          : undefined,
     },
     {
       label: "High-frequency occupancy",
@@ -710,14 +756,14 @@ export function CompareTable({
   return (
     <div className="overflow-hidden rounded-xl bg-bg-elevated">
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-4 pt-4 pb-3 sm:px-5">
-        <h2 className="text-sm font-medium text-fg">Measurements</h2>
+        <h2 className="text-sm font-medium text-fg">Files and measurements</h2>
         <p className="flex items-center gap-1.5 text-xs text-faint">
           <span aria-hidden className="inline-block size-1.5 rounded-full bg-win" />
           marks the more favorable measurement, not a verdict on its own
         </p>
       </div>
       <table className="w-full table-fixed text-left text-xs">
-        <caption className="sr-only">Audio comparison measurements for both files</caption>
+        <caption className="sr-only">File facts and audio measurements for both files</caption>
         <thead className="border-b border-border font-mono tracking-widest text-faint uppercase">
           <tr>
             <th scope="col" className="w-[38%] px-3 py-3 font-normal sm:px-5">
@@ -752,6 +798,49 @@ export function CompareTable({
           </tr>
         </thead>
         <tbody>
+          <GroupRow label="File" />
+          {fileRows.map((row) => {
+            const differs = row.av !== row.bv;
+            return (
+              <tr
+                key={row.label}
+                className="border-b border-border/70 transition-colors hover:bg-bg-inset/50"
+              >
+                <th scope="row" className="px-3 py-3 align-top font-normal text-muted sm:px-5">
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {row.label}
+                    {differs && (
+                      <span className="rounded bg-warn/15 px-1.5 py-px font-mono text-[10px] tracking-wide text-warn uppercase">
+                        differs
+                      </span>
+                    )}
+                  </span>
+                  {row.note && (differs || row.label === "Bit depth") && (
+                    <span className="mt-1 block text-[11px] leading-snug text-faint">
+                      {row.note}
+                    </span>
+                  )}
+                </th>
+                <td
+                  className={cn(
+                    "py-3 pr-2 align-top font-mono tabular-nums [overflow-wrap:anywhere]",
+                    differs ? "text-fg" : "text-muted",
+                  )}
+                >
+                  {row.av}
+                </td>
+                <td
+                  className={cn(
+                    "py-3 pr-4 align-top font-mono tabular-nums [overflow-wrap:anywhere]",
+                    differs ? "text-fg" : "text-muted",
+                  )}
+                >
+                  {row.bv}
+                </td>
+              </tr>
+            );
+          })}
+          <GroupRow label="Measurements" />
           {rows.map((row) => (
             <tr
               key={row.label}
@@ -783,6 +872,21 @@ export function CompareTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** A labelled divider between the file facts and the measured values. */
+function GroupRow({ label }: { label: string }) {
+  return (
+    <tr className="border-b border-border/70 bg-bg-inset/40">
+      <th
+        scope="colgroup"
+        colSpan={3}
+        className="px-3 py-2 text-left font-mono text-[10px] font-normal tracking-widest text-faint uppercase sm:px-5"
+      >
+        {label}
+      </th>
+    </tr>
   );
 }
 

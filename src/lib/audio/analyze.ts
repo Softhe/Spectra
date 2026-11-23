@@ -1,4 +1,5 @@
 import { fft, hann } from "./fft";
+import { codingKind, isLosslessCodec } from "./format";
 import { sniffContainer } from "./sniff";
 import { cacheGet, cacheKeyForFile, cachePut } from "./cache";
 import { runDspParallel } from "./dsp-client";
@@ -30,7 +31,11 @@ function newAnalysisId(): string {
 }
 const EPS = 1e-12;
 const DISPLAY_BINS = 512;
-const DISPLAY_MAX_HZ = 22050;
+// Spectrograms show up to this frequency (or the file's Nyquist when lower).
+// Hi-res files measure past 22 kHz, so the picture must show that range too:
+// a verdict about 30 kHz of bandwidth needs content the reader can see.
+// Above 48 kHz (192 kHz files) the picture would squash the audible band.
+const DISPLAY_MAX_HZ = 48000;
 
 const hannWindow = hann(FFT_SIZE);
 let windowSumSq = 0;
@@ -1913,6 +1918,101 @@ export function compareAnalyses(
   return result;
 }
 
+/** Content above this is beyond the range most adults hear. */
+export const HEARING_LIMIT_HZ = 20000;
+
+const fmtKHz = (hz: number) =>
+  hz >= 1000
+    ? `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : hz % 100 === 0 ? 1 : 2)} kHz`
+    : `${Math.round(hz)} Hz`;
+
+/** The highest frequency this file's format can hold (half its sample rate). */
+export function formatLimitHz(x: Pick<Analysis, "nyquistHz">): number {
+  return x.nyquistHz;
+}
+
+/**
+ * True when the browser decoded below the rate the file declares (it fell
+ * back to 48 or 44.1 kHz). The measured ceiling is then the decoder's, not
+ * the format's, and no note may present it as a property of the file.
+ */
+export function decodedBelowFileRate(x: Pick<Analysis, "nyquistHz" | "container">): boolean {
+  const rate = decodeRateFor(x.container.sampleRate, x.container.codec);
+  return rate != null && rate > x.nyquistHz * 2 + 1;
+}
+
+/** "format limit", or "decode limit" when the browser decoded below the file's rate. */
+export function limitLabel(x: Pick<Analysis, "nyquistHz" | "container">): string {
+  return decodedBelowFileRate(x) ? "decode limit" : "format limit";
+}
+
+/**
+ * A high-rate lossless file whose content stops near a CD/DVD band edge
+ * (22.05 or 24 kHz) is consistent with a 44.1/48 kHz source converted to a
+ * higher rate: the extra sample rate adds file size but no recording.
+ * Returns the likely source rate, or null.
+ */
+export function likelyUpsampledFrom(
+  x: Pick<Analysis, "nyquistHz" | "cutoffHz" | "container" | "rolloff">,
+): number | null {
+  if (codingKind(x.container.codec) !== "lossless" || x.nyquistHz < 44000) return null;
+  // Resampler anti-alias filters end in a cliff. A natural fade near 22 kHz
+  // can be a genuine recording's microphone or mastering rolloff.
+  if (x.rolloff === "natural") return null;
+  // Resampler edges land 0.9–1.0 × the source Nyquist.
+  for (const rate of [44100, 48000]) {
+    const edge = rate / 2;
+    if (x.cutoffHz >= edge * 0.9 && x.cutoffHz <= edge * 1.02) return rate;
+  }
+  return null;
+}
+
+/**
+ * Facts about the two files' formats that a verdict must mention: a channel
+ * layout difference (never scored) and a likely upsampled hi-res file.
+ * Reported in every outcome, like the padded bit-depth note.
+ */
+export function formatNotes(
+  a: Pick<
+    ComparisonMetrics,
+    "channels" | "stereoWidth" | "nyquistHz" | "cutoffHz" | "container" | "rolloff"
+  >,
+  b: Pick<
+    ComparisonMetrics,
+    "channels" | "stereoWidth" | "nyquistHz" | "cutoffHz" | "container" | "rolloff"
+  >,
+  labels: { a: string; b: string },
+): string {
+  let out = "";
+  const monoA = a.channels < 2;
+  const monoB = b.channels < 2;
+  if (monoA !== monoB) {
+    const [mono, stereo] = monoA ? [labels.a, labels.b] : [labels.b, labels.a];
+    out += ` File ${mono} is mono and File ${stereo} has ${monoA ? b.channels : a.channels} channels. Any stereo information missing from File ${mono} is not part of this preference; listen to judge it.`;
+  } else if (!monoA && !monoB) {
+    // Near-identical channels in a two-channel file: most likely a mono
+    // fold-down stored as stereo. stereoWidth is sampled, not an exact
+    // equality test, so the note says "almost identical".
+    const dualA = a.channels === 2 && a.stereoWidth < 0.001;
+    const dualB = b.channels === 2 && b.stereoWidth < 0.001;
+    if (dualA !== dualB) {
+      const [dual, real] = dualA ? [labels.a, labels.b] : [labels.b, labels.a];
+      const realWidth = dualA ? b.stereoWidth : a.stereoWidth;
+      if (realWidth >= 0.01)
+        out += ` File ${dual} has almost identical left and right channels (likely mono stored as stereo), while File ${real} carries clear stereo information. Channel layout is not part of this preference.`;
+    }
+  }
+  for (const [x, slot] of [
+    [a, labels.a],
+    [b, labels.b],
+  ] as const) {
+    const from = likelyUpsampledFrom(x);
+    if (from)
+      out += ` File ${slot} is a ${fmtKHz(x.nyquistHz * 2)} file, but its content ends near ${(x.cutoffHz / 1000).toFixed(1)} kHz. That is consistent with a ${fmtKHz(from)} source converted to a higher sample rate, which adds file size but not recorded detail.`;
+  }
+  return out;
+}
+
 /** Measurement-only calibration seam. Product recommendations must use compareAnalyses. */
 export function compareQualityMeasurements(
   a: ComparisonMetrics,
@@ -2014,6 +2114,7 @@ export function compareQualityMeasurements(
         ? `File ${labels.a} reaches ${fmtK(a.cutoffHz)} and File ${labels.b} ${fmtK(b.cutoffHz)}. The experimental scores are close (${a.score.toFixed(0)} vs ${b.score.toFixed(0)}), so these measurements do not support a preference.${sourceNote}`
         : `Both reach about ${fmtK(a.cutoffHz)} in the measured passages. Other differences may remain undetected.${sourceNote}`;
     detail += padNotes();
+    detail += formatNotes(a, b, labels);
     detail += identityNote;
     return {
       winner,
@@ -2045,8 +2146,7 @@ export function compareQualityMeasurements(
       : "";
 
   // CAF belongs here with FLAC/WAV: sniff.ts parses it and it is lossless.
-  const isLosslessWrap = (x: ComparisonMetrics) =>
-    /FLAC|PCM|ALAC|WAV|AIFF|CAF/i.test(x.container.codec);
+  const isLosslessWrap = (x: ComparisonMetrics) => isLosslessCodec(x.container.codec);
   // A lossless wrapper around band-limited audio is worth flagging on EITHER
   // file: a FLAC made from a 320 kbps MP3 can still beat a 128 kbps rip.
   // Source-limited files are exempt: their ceiling is the music, so calling
@@ -2056,6 +2156,8 @@ export function compareQualityMeasurements(
   const fakeLossless = (x: ComparisonMetrics, slot: string, strict: boolean): string =>
     isLosslessWrap(x) &&
     x.qualityClass !== "lossless" &&
+    // formatNotes already explains an upsampled file more specifically.
+    likelyUpsampledFrom(x) === null &&
     !x.sourceLimited &&
     (!strict || x.rolloff === "brickwall" || x.cutoffHz < 19500)
       ? ` File ${slot} is wrapped as ${x.container.codec} (${Math.round(x.container.claimedKbps ?? x.containerKbps)} kbps), but the audio inside is band-limited.`
@@ -2082,11 +2184,26 @@ export function compareQualityMeasurements(
         ? ""
         : " Lengths differ, so double-check these are the same song.";
 
+  // Cross-format context. A copy at its format's ceiling lost nothing it
+  // could have held: the difference is the sample rate, not damage. And a
+  // lead that lies entirely above hearing is real but not audible detail.
+  const atLimit =
+    airLead >= 500 &&
+    worse.nyquistHz < better.nyquistHz - 500 &&
+    worse.cutoffHz >= formatLimitHz(worse) * 0.95 &&
+    !decodedBelowFileRate(worse)
+      ? ` File ${worseSlot} reaches the limit of its format: a ${fmtKHz(worse.nyquistHz * 2)} file cannot hold anything above ${fmtKHz(worse.nyquistHz)}, so the sample rate alone explains the difference above that point.`
+      : "";
+  const ultrasonic =
+    airLead >= 500 && worse.cutoffHz >= HEARING_LIMIT_HZ
+      ? ` The extra bandwidth in File ${betterSlot} lies above ${(worse.cutoffHz / 1000).toFixed(1)} kHz, beyond the range most adults hear. Listen before deciding it matters.`
+      : "";
+
   return {
     winner,
     confidence,
     headline: `Winner: File ${betterSlot}. '${truncName(better.fileName)}'`,
-    detail: `${bandwidth}${wall}${mismatch}${padNotes()}${uncertain ? identityNote : lengthNote}`,
+    detail: `${bandwidth}${atLimit}${ultrasonic}${wall}${mismatch}${padNotes()}${formatNotes(a, b, labels)}${uncertain ? identityNote : lengthNote}`,
     cutoffDeltaHz,
     sameLength,
     songMatch: songMatch ?? undefined,
@@ -2109,6 +2226,9 @@ export type ComparisonMetrics = Pick<
   | "envelope"
   | "effectiveBits"
   | "comparisonCoverage"
+  | "nyquistHz"
+  | "channels"
+  | "stereoWidth"
 >;
 
 export const QUALITY_LABEL: Record<QualityClass, string> = {
