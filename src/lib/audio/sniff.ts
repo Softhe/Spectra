@@ -613,7 +613,13 @@ function parseOgg(bytes: Uint8Array): ContainerInfo | null {
   if (ascii(bytes, 0, 4) !== "OggS") return null;
   if (findAscii(bytes.subarray(0, 128), "OpusHead") >= 0) {
     const head = findAscii(bytes, "OpusHead");
-    const channels = head >= 0 && head + 9 < bytes.length ? bytes[head + 9]! : 2;
+    // Opus identification header: version @ +8, channel count @ +9. Anything
+    // outside 1..8 is corrupt/truncated — report unknown rather than a byte
+    // that channelLabel would render as "Mono".
+    const channels =
+      head >= 0 && head + 9 < bytes.length && bytes[head + 9]! >= 1 && bytes[head + 9]! <= 8
+        ? bytes[head + 9]!
+        : null;
     return {
       codec: "Opus",
       sampleRate: 48000,

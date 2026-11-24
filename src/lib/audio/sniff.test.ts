@@ -619,3 +619,53 @@ describe("sniffContainer: ID3-tagged FLAC", () => {
     assert.deepEqual([r.codec, r.sampleRate, r.channels, r.bitDepth], ["FLAC", 44100, 2, 16]);
   });
 });
+
+describe("sniffContainer: Ogg OpusHead channel validation", () => {
+  // Build a minimal but structurally faithful Ogg page holding an Opus
+  // identification header; the channel byte sits at OpusHead + 9.
+  const oggOpus = (channels: number) => {
+    const afterMagic: number[] = [
+      1, // version
+      channels,
+      ...le16(0x1c0), // pre-skip (typical decoder value)
+      ...le32(48000), // input sample rate
+      ...le16(0), // output gain
+      0, // mapping family
+    ];
+    const body = [...bytesOf("OpusHead"), ...afterMagic];
+    return new Uint8Array([
+      ...bytesOf("OggS"),
+      0, // stream structure version
+      2, // header type: BOS
+      ...new Array(8).fill(0), // granule position
+      ...le32(0x1234), // serial
+      ...le32(0), // page sequence
+      ...le32(0), // CRC (not validated by the sniffer)
+      1, // segment count
+      body.length, // lacing value
+      ...body,
+    ]).buffer;
+  };
+
+  it("reads the channel count for a valid head", () => {
+    const r = sniffContainer(oggOpus(1), "a.opus", "audio/ogg");
+    assert.deepEqual([r.codec, r.sampleRate, r.channels], ["Opus", 48000, 1]);
+    const s = sniffContainer(oggOpus(6), "a.opus", "audio/ogg");
+    assert.deepEqual([s.codec, s.channels], ["Opus", 6]);
+  });
+
+  it("reports unknown channels for an out-of-range head byte", () => {
+    // 0 would render as "Mono" via channelLabel; corrupt bytes mean we
+    // don't know the count, not that the file is mono/surround.
+    for (const bad of [0, 9, 255]) {
+      const r = sniffContainer(oggOpus(bad), "a.opus", "audio/ogg");
+      assert.equal(r.channels, null, `channels byte ${bad}`);
+    }
+  });
+
+  it("reports unknown channels when the head is truncated past the channel byte", () => {
+    const b = new Uint8Array([...bytesOf("OggS"), 0, 2, ...new Array(8).fill(0), ...bytesOf("OpusHead")]);
+    const r = sniffContainer(b.buffer, "a.opus", "audio/ogg");
+    assert.equal(r.channels, null);
+  });
+});

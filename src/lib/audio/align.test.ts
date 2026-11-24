@@ -4,6 +4,7 @@ import {
   alignEnvelopes,
   bTimeOf,
   envelopeFromMono,
+  envelopeFromTaps,
   sampleEnvelope,
   songMatchOf,
   testLag,
@@ -109,6 +110,59 @@ describe("alignEnvelopes", () => {
     const { lagSec, correlation } = alignEnvelopes(a, b);
     assert.equal(lagSec, 0);
     assert.ok(correlation > 0.999);
+  });
+
+  // Two copies of the same periodic material produce near-identical
+  // correlations at every integer multiple of the period (here ~1e-5 apart
+  // from strided-tap float noise); the scan must keep lag 0, not wander to
+  // whichever multi-period lag happened to edge out the rest.
+  const periodicShapes: [string, (t: number) => number, number[]][] = [
+    ["near-constant master (period 5.3 s)", (t) => 0.95 + 0.05 * Math.sin((2 * Math.PI * t) / 5.3), [26.5]],
+    [
+      "repeating percussion (period 0.5 s)",
+      (t) => {
+        const tb = t % 0.5;
+        return Math.exp(-tb * 30) * (0.8 + 0.2 * Math.sin((2 * Math.PI * t) / 11));
+      },
+      [22],
+    ],
+  ];
+
+  for (const [name, shape, tieLagSecs] of periodicShapes) {
+    it(`prefers lag 0 over tied periodic lags (${name})`, () => {
+      const taps = (sr: number) =>
+        envelopeFromTaps(Math.floor(240 * sr), sr, (i) => shape(i / sr));
+      const a = taps(48000);
+      const b = taps(44100);
+      const { lagSec, correlation } = alignEnvelopes(a, b);
+      assert.equal(Math.abs(lagSec), 0, `lagSec ${lagSec}, want 0`);
+      assert.ok(correlation > 0.999);
+      // The lags it must refuse are genuine ties of the returned one.
+      for (const tieLagSec of tieLagSecs) {
+        const r = testLag(a, b, Math.round(tieLagSec / a.blockSec)).corr;
+        assert.ok(
+          Math.abs(r - correlation) < 2e-3,
+          `lag ${tieLagSec}s r=${r} should tie the returned ${correlation}`,
+        );
+      }
+    });
+  }
+
+  // The tie-break must only arbitrate between distinct peaks: on a slow,
+  // smooth envelope the lags beside the true one sit within the tie epsilon,
+  // and must not drag an exact trim one block toward 0.
+  it("keeps the exact lag of a trim on a broad correlation peak", () => {
+    const shape = (t: number) =>
+      1 + 0.3 * Math.sin(t / 3.1) + 0.2 * Math.sin(t / 7.7 + 1) + 0.15 * Math.sin(t / 1.9 + 2);
+    const n = 240 / BS;
+    for (const cutSec of [-8, -3, 3, 8]) {
+      const k = Math.round(cutSec / BS);
+      const a = blocks(n, (i) => shape(i * BS) ** 2);
+      const b = blocks(n, (i) => shape((i + k) * BS) ** 2);
+      const { lagSec, correlation } = alignEnvelopes(a, b);
+      assert.equal(lagSec, cutSec, `cut ${cutSec}s`);
+      assert.ok(correlation > 0.9999);
+    }
   });
 });
 
